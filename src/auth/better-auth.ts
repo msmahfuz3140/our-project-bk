@@ -19,6 +19,8 @@ export function getBetterAuth(): any {
   const trustedOrigins = Array.from(new Set([
     'https://accuracy.tools',
     'https://www.accuracy.tools',
+    'https://our-project-fn.vercel.app',
+    'https://our-project-bk.vercel.app',
     'https://rouletteaccuracy.com',
     'https://www.rouletteaccuracy.com',
     'http://localhost:3000',

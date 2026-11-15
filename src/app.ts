@@ -57,12 +57,13 @@ app.use(cors({
     const isAllowedHost =
       hostname === 'accuracy.tools' ||
       hostname === 'www.accuracy.tools' ||
+      hostname.endsWith('.accuracy.tools') ||
       hostname === 'rouletteaccuracy.com' ||
       hostname === 'www.rouletteaccuracy.com' ||
       hostname.endsWith('.rouletteaccuracy.com') ||
       hostname === 'localhost' ||
       hostname === '127.0.0.1' ||
-      (hostname.endsWith('.vercel.app') && hostname.includes('our-project-bk'));
+      (hostname.endsWith('.vercel.app') && (hostname.includes('our-project') || hostname.includes('accuracy')));
 
     if (
       allowed.includes(cleanOrigin) ||
@@ -143,7 +144,7 @@ app.get(['/', '/api', '/api/index'], (_req: Request, res: Response) => {
     success: true,
     message: 'Roulette Accuracy Backend REST API is live and operational.',
     version: '1.0.0',
-    website: 'https://rouletteaccuracy.com',
+    website: env.PUBLIC_FRONTEND_URL || 'https://www.accuracy.tools',
     health: '/health',
     apiPrefix: '/api/v1'
   });

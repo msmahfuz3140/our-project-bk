@@ -8,18 +8,20 @@ const booleanString = z
   .default('false')
   .transform((value) => value === 'true' || value === '1' || value.toLowerCase() === 'yes');
 
+const isVercelDeployment = Boolean(process.env.VERCEL) || process.env.VERCEL_ENV === 'production';
+
 const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default(isVercelDeployment ? 'production' : 'development'),
   PORT: z.string().default('5000').transform(Number),
-  CORS_ORIGIN: z.string().default('http://localhost:3000,http://localhost:3001,https://accuracy.tools,https://www.accuracy.tools,https://rouletteaccuracy.com,https://www.rouletteaccuracy.com'),
+  CORS_ORIGIN: z.string().default('http://localhost:3000,http://localhost:3001,https://accuracy.tools,https://www.accuracy.tools,https://our-project-fn.vercel.app,https://our-project-bk.vercel.app,https://rouletteaccuracy.com,https://www.rouletteaccuracy.com'),
   MONGODB_URI: z.string().default('mongodb://127.0.0.1:27017/roulette-accuracy'),
   JWT_SECRET: z.string().default('replace_with_high_entropy_cryptographic_secret_min_32_characters'),
   JWT_EXPIRES_IN: z.string().default('7d'),
   BETTER_AUTH_SECRET: z.string().default('replace_with_better_auth_high_entropy_secret_min_32_chars'),
-  BETTER_AUTH_URL: z.string().default('http://localhost:5050'),
-  PUBLIC_WEBSITE_URL: z.string().default('http://localhost:3000'),
-  FRONTEND_URL: z.string().default('http://localhost:3000'),
-  BACKEND_URL: z.string().default('http://localhost:5050'),
+  BETTER_AUTH_URL: z.string().default(isVercelDeployment ? 'https://our-project-bk.vercel.app' : 'http://localhost:5050'),
+  PUBLIC_WEBSITE_URL: z.string().default(isVercelDeployment ? 'https://www.accuracy.tools' : 'http://localhost:3000'),
+  FRONTEND_URL: z.string().default(isVercelDeployment ? 'https://www.accuracy.tools' : 'http://localhost:3000'),
+  BACKEND_URL: z.string().default(isVercelDeployment ? 'https://our-project-bk.vercel.app' : 'http://localhost:5050'),
 
   // NOWPayments — all secrets stay server-side only.
   NOWPAYMENTS_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
@@ -79,7 +81,7 @@ const data = parsed.data;
  * ever running on the live domain if NODE_ENV was misconfigured.
  */
 export const isProductionRuntime =
-  data.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production';
+  data.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production' || Boolean(process.env.VERCEL);
 
 function trimTrailingSlash(url: string): string {
   return url.trim().replace(/\/+$/, '');
