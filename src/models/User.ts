@@ -13,7 +13,6 @@ export interface IUser extends Document {
   email?: string;
   phone?: string;
   passwordHash: string;
-  plainPassword?: string;
   role: UserRole;
   isEmailVerified: boolean;
   isPhoneVerified: boolean;
@@ -37,6 +36,7 @@ export interface IUser extends Document {
   registrationIp?: string;
   lastLoginAt?: Date;
   sessionsRevokedAt?: Date;
+  createdByAdminId?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -66,10 +66,6 @@ const UserSchema = new Schema<IUser>({
   passwordHash: {
     type: String,
     required: true
-  },
-  plainPassword: {
-    type: String,
-    trim: true
   },
   role: {
     type: String,
@@ -160,6 +156,11 @@ const UserSchema = new Schema<IUser>({
   },
   sessionsRevokedAt: {
     type: Date
+  },
+  createdByAdminId: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    index: true
   }
 }, {
   timestamps: true

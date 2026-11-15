@@ -117,19 +117,29 @@ See [.env.example](.env.example) for placeholder definitions.
 | :--- | :---: | :--- | :--- |
 | `NODE_ENV` | Yes | Environment stage (`development`, `production`, `test`) | `production` |
 | `PORT` | Yes | Listening port for the Express application | `5000` |
-| `CORS_ORIGIN` | Yes | Allowed frontend origin(s) for browser requests | `https://rouletteaccuracy.com` |
+| `CORS_ORIGIN` | Yes | Allowed frontend origin(s) for browser requests | `https://accuracy.tools,https://www.accuracy.tools` |
 | `MONGODB_URI` | Yes | MongoDB Atlas connection URI with replica set | `mongodb+srv://user:pass@cluster.mongodb.net/platform?retryWrites=true&w=majority` |
 | `JWT_SECRET` | Yes | High-entropy string for signing user session tokens (min 32 chars) | `openssl rand -base64 48` |
 | `JWT_EXPIRES_IN` | Yes | Token validity duration | `7d` |
 | `BETTER_AUTH_SECRET` | No | Cryptographic secret for Better Auth internal state | `openssl rand -hex 32` |
-| `BETTER_AUTH_URL` | No | Base API URL exposed to Better Auth clients | `https://api.rouletteaccuracy.com` |
-| `PUBLIC_WEBSITE_URL` | Yes | Primary public frontend URL for email/SMS links | `https://rouletteaccuracy.com` |
-| `FRONTEND_URL` | Yes | Internal/customer redirect URL after payment completion | `https://rouletteaccuracy.com` |
-| `BACKEND_URL` | Yes | Fully qualified public URL for this backend API instance | `https://api.rouletteaccuracy.com` |
-| `NOWPAYMENTS_API_KEY` | Yes | Production API key from NOWPayments Store Settings | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
-| `NOWPAYMENTS_IPN_SECRET` | Yes | Shared secret for HMAC-SHA512 webhook verification | `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `NOWPAYMENTS_API_URL` | Yes | NOWPayments REST endpoint | `https://api.nowpayments.io/v1` |
-| `NOWPAYMENTS_IPN_CALLBACK_URL` | Yes | Fully qualified public callback route for IPN callbacks | `https://api.rouletteaccuracy.com/api/v1/payments/ipn` |
+| `BETTER_AUTH_URL` | No | Base API URL exposed to Better Auth clients | `https://our-project-bk.vercel.app` |
+| `PUBLIC_WEBSITE_URL` | Yes | Primary public frontend URL for email/SMS links | `https://accuracy.tools` |
+| `FRONTEND_URL` | Yes | Internal/customer redirect URL after payment completion | `https://accuracy.tools` |
+| `BACKEND_URL` | Yes | Fully qualified public URL for this backend API instance | `https://our-project-bk.vercel.app` |
+| `NOWPAYMENTS_ENV` | Yes | `sandbox` or `production` (selects the official API host) | `sandbox` |
+| `NOWPAYMENTS_API_KEY` | Yes | Sandbox or production API key from NOWPayments Store Settings | `your_api_key_here` |
+| `NOWPAYMENTS_IPN_SECRET` | Yes | Shared secret for HMAC-SHA512 webhook verification | `your_ipn_secret_here` |
+| `NOWPAYMENTS_API_URL` | Yes | NOWPayments REST endpoint | `https://api-sandbox.nowpayments.io/v1` |
+| `NOWPAYMENTS_LIVE_ENABLED` | Yes | Explicit production live-transaction gate | `false` |
+| `NOWPAYMENTS_REQUIRE_API_VERIFICATION` | Yes | Re-fetch each finished payment before activation | `true` |
+| `PAYMENT_IPN_CALLBACK_URL` | Yes | Fully qualified public IPN endpoint | `https://our-project-bk.vercel.app/api/nowpayments/webhook` |
+| `PAYMENT_SUCCESS_URL` | Yes | Checkout success redirect | `https://accuracy.tools/checkout/success` |
+| `PAYMENT_CANCEL_URL` | Yes | Checkout cancel redirect | `https://accuracy.tools/checkout/failed` |
+| `PAYMENT_PENDING_URL` | Yes | Pending/partially-paid redirect | `https://accuracy.tools/checkout/pending` |
+| `UPSTASH_REDIS_REST_URL` | No | Optional Redis REST cache endpoint | `https://...upstash.io` |
+| `UPSTASH_REDIS_REST_TOKEN` | No | Optional Redis REST bearer token | `your-token` |
+| `CACHE_REDIS_TIMEOUT_MS` | No | Redis REST timeout before memory fallback | `800` |
+| `INITIAL_ADMIN_PASSWORD` | Bootstrap only | 12+ character first-time admin password; never logged | `use_a_secret_manager` |
 | `MAIN_ADMIN_EMAILS` | Yes | Comma-separated list of exactly 4 designated owner emails | `admin1@rouletteaccuracy.com,admin2@rouletteaccuracy.com,admin3@rouletteaccuracy.com,admin4@rouletteaccuracy.com` |
 | `EMAIL_PROVIDER_API_KEY` | Yes | Transactional email provider API key (Resend / SendGrid) | `re_xxxxxxxxxxxxxxxxxxxx` |
 | `EMAIL_FROM` | Yes | Verified RFC-compliant sender address | `Roulette Accuracy <security@rouletteaccuracy.com>` |
@@ -198,11 +208,11 @@ See [.env.example](.env.example) for placeholder definitions.
 ### Cryptographic Webhook Flow
 1. Client selects one of 5 subscription tiers (`PLAN_15_DAYS`, `PLAN_1_MONTH`, `PLAN_3_MONTHS`, `PLAN_6_MONTHS`, `PLAN_1_YEAR`).
 2. Backend generates a `PurchaseOrder` with an immutable price snapshot in integer cents.
-3. Backend calls NOWPayments `POST /v1/invoice` with `ipn_callback_url: env.NOWPAYMENTS_IPN_CALLBACK_URL` and `success_url: env.PUBLIC_FRONTEND_URL/checkout/pending`.
+3. Backend calls NOWPayments `POST /v1/invoice` with `ipn_callback_url: env.PAYMENT_IPN_CALLBACK_URL` and success/cancel URLs from `PAYMENT_SUCCESS_URL` / `PAYMENT_CANCEL_URL`.
 4. Client pays on blockchain using USDT (TRC-20 / ERC-20), BTC, ETH, or supported coins.
 5. NOWPayments dispatches IPN callback with HTTP header `x-nowpayments-sig`.
-6. Backend computes HMAC-SHA512 signature by recursively sorting payload keys alphabetically, verifies via `crypto.timingSafeEqual`, and verifies payment amount.
-7. Upon `finished` or `confirmed` status, backend fulfills the subscription, books the ledger entry, and credits the referring moderator 50% commission.
+6. Backend computes HMAC-SHA512 over the recursively sorted JSON payload, verifies with `crypto.timingSafeEqual`, then validates amount, currency, order and provider payment ID.
+7. For `finished` only, the backend independently re-fetches the payment from NOWPayments, atomically claims the order, fulfills the subscription, books the ledger entry, and credits the referring moderator 50% commission. `confirmed` alone never unlocks Premium.
 8. **Security Mandate**: Subscriptions are never activated by frontend client redirects.
 
 ---
@@ -211,14 +221,16 @@ See [.env.example](.env.example) for placeholder definitions.
 
 ### Automatic local bootstrap
 
-On the first authenticated request, if the database has no `SUPER_ADMIN`, the backend creates one from:
+On the first authenticated request, if the database has no `SUPER_ADMIN`, the backend can create one from:
 
 ```env
-MAIN_ADMIN_EMAILS=mdmahfuzulhaque3140@gmail.com
-INITIAL_ADMIN_PASSWORD=RouletteAccuracy@2026
+MAIN_ADMIN_EMAILS=owner@your-domain.com
+INITIAL_ADMIN_PASSWORD=use_a_12_plus_character_secret_from_your_secret_manager
 ```
 
-The seeded admin is also given a one-year manual subscription. Change both values before any public deployment and change the password after first login.
+The fallback is fail-closed: if `INITIAL_ADMIN_PASSWORD` is missing, placeholder text, or shorter than 12 characters, no admin is created and an error is logged. Passwords are never printed to logs.
+
+The seeded admin is also given a one-year manual subscription. Change the password after first login.
 
 ### Optional multi-admin bootstrap
 
@@ -234,7 +246,7 @@ Then run:
 npm run bootstrap:admins
 ```
 
-The script generates unique high-entropy passwords, creates the `SUPER_ADMIN` accounts, logs a `MAIN_ADMIN_BOOTSTRAP` audit record for each, and prints the one-time credentials in the terminal.
+The script creates the `SUPER_ADMIN` accounts using `INITIAL_ADMIN_PASSWORD` from the environment, logs a `MAIN_ADMIN_BOOTSTRAP` audit record for each, and never prints the password. Share credentials only through a secure channel.
 
 ---
 
@@ -252,23 +264,20 @@ The script generates unique high-entropy passwords, creates the `SUPER_ADMIN` ac
 
 ## 🚢 Production Deployment Steps
 
-### Step 1: Deploy Backend (Render / Railway / VPS)
-1. Link your Git repository to your hosting provider.
-2. Configure runtime:
-   - **Environment**: Node.js 20+
-   - **Build Command**: `npm install --legacy-peer-deps && npm run build`
-   - **Start Command**: `npm start`
-   - **Health Check Path**: `/health`
-3. Add all production environment variables from `.env.example`.
-4. Deploy and record the assigned HTTPS URL (e.g., `https://api.rouletteaccuracy.com`).
+### Step 1: Deploy Backend (Vercel — `our-project-bk`)
+1. Import the backend as a Vercel project.
+2. Set `NODE_ENV=production`, `BACKEND_URL=https://our-project-bk.vercel.app`, and all payment variables from `.env.example`.
+3. Deploy. Verify `${BACKEND_URL}/health` returns 200.
+4. Set the NOWPayments IPN URL to `https://our-project-bk.vercel.app/api/nowpayments/webhook`.
 
-### Step 2: Deploy Frontend (Vercel)
-1. Import `roulette-accuracy-frontend` repository into Vercel.
+### Step 2: Deploy Frontend (Vercel — `accuracy.tools`)
+1. Import the frontend project into Vercel.
 2. Set Environment Variables:
-   - `NEXT_PUBLIC_API_URL=https://api.rouletteaccuracy.com/api/v1`
-   - `NEXT_PUBLIC_APP_URL=https://rouletteaccuracy.com`
-3. Deploy. Add custom domain `rouletteaccuracy.com` with SSL certificate.
-4. Update `CORS_ORIGIN=https://rouletteaccuracy.com` and `PUBLIC_WEBSITE_URL=https://rouletteaccuracy.com` in backend environment.
+   - `NEXT_PUBLIC_API_URL=https://our-project-bk.vercel.app/api/v1`
+   - `NEXT_PUBLIC_APP_URL=https://accuracy.tools`
+   - `BACKEND_URL=https://our-project-bk.vercel.app` (only needed for the optional frontend webhook proxy)
+3. Deploy. Add the custom domain `accuracy.tools` with SSL.
+4. Ensure backend `CORS_ORIGIN` includes `https://accuracy.tools` and `PUBLIC_WEBSITE_URL=https://accuracy.tools`.
 
 ### Step 3: Run Database Initialization & Verification
 1. Access the backend host container terminal (or run locally with production DB URI):
@@ -284,7 +293,7 @@ The script generates unique high-entropy passwords, creates the `SUPER_ADMIN` ac
 | Symptom | Cause | Solution |
 | :--- | :--- | :--- |
 | `CORS Error: Origin not allowed` | `CORS_ORIGIN` does not match the frontend domain | Update backend `CORS_ORIGIN` to exact frontend HTTPS URL without trailing slash. |
-| `IPN Signature Mismatch (400)` | Wrong `NOWPAYMENTS_IPN_SECRET` or payload modified by proxy | Verify IPN secret in NOWPayments dashboard. Ensure raw JSON body is received without proxy modification. |
+| `IPN Signature Mismatch (401)` | Wrong `NOWPAYMENTS_IPN_SECRET` or payload modified by proxy | Verify IPN secret in NOWPayments dashboard. Ensure the raw JSON body is received without proxy modification. |
 | `MongoDB Server Selection Timeout` | Atlas IP Access List blocking connection | Add backend outbound IP addresses or `0.0.0.0/0` in MongoDB Atlas Network Access. |
 | `CSV Export Unauthorized` | Session token missing from download link | Pass `?token=<jwt>` in the export URL; the backend `requireAuth` middleware automatically inspects query parameters. |
 

@@ -6,7 +6,7 @@ import { ReferralCommissionModel } from '../models/ReferralCommission';
 import { AuditLogModel } from '../models/AuditLog';
 import { UserRole } from '../shared/roles';
 import { PaymentStatus, SubscriptionStatus } from '../shared/subscriptions';
-import { SUBSCRIPTION_PLANS } from '../shared/plans';
+import { PlanModel } from '../models/Plan';
 import { ApiError } from '../utils/apiError';
 
 /**
@@ -114,7 +114,7 @@ export class ReportsService {
 
     // 2. Subscriptions telemetry
     const now = new Date();
-    const [totalActive, totalExpired, totalRevoked, allActiveSubs] = await Promise.all([
+    const [totalActive, totalExpired, totalRevoked, planRows, catalogPlans] = await Promise.all([
       SubscriptionModel.countDocuments({
         status: SubscriptionStatus.ACTIVE,
         isRevoked: { $ne: true },
@@ -126,120 +126,196 @@ export class ReportsService {
       SubscriptionModel.countDocuments({
         $or: [{ isRevoked: true }, { status: SubscriptionStatus.REVOKED }]
       }),
-      SubscriptionModel.find({
-        status: SubscriptionStatus.ACTIVE,
-        isRevoked: { $ne: true },
-        endDate: { $gt: now }
-      }).select('planId')
+      SubscriptionModel.aggregate([
+        {
+          $match: {
+            status: SubscriptionStatus.ACTIVE,
+            isRevoked: { $ne: true },
+            endDate: { $gt: now }
+          }
+        },
+        { $group: { _id: '$planId', count: { $sum: 1 } } }
+      ]),
+      PlanModel.find().select('planId name').lean()
     ]);
 
-    // Calculate plan distribution
+    // Calculate plan distribution from the live plan catalogue.
     const planCounts: Record<string, number> = {};
-    for (const sub of allActiveSubs) {
-      planCounts[sub.planId] = (planCounts[sub.planId] || 0) + 1;
+    for (const row of planRows) {
+      if (row._id) planCounts[row._id] = row.count;
     }
 
-    const totalActiveCount = allActiveSubs.length || 1;
-    const planDistribution = Object.keys(SUBSCRIPTION_PLANS).map((pId) => {
-      const plan = SUBSCRIPTION_PLANS[pId];
-      const count = planCounts[pId] || 0;
-      return {
-        planId: pId,
-        planName: plan?.name || pId,
-        activeCount: count,
-        percentage: Math.round((count / totalActiveCount) * 1000) / 10
-      };
-    });
+    const totalActiveCount = planRows.reduce((sum: number, row: any) => sum + (row.count || 0), 0) || 1;
+    const knownPlanIds = new Set(catalogPlans.map((plan) => plan.planId));
+    const planDistribution = [
+      ...catalogPlans.map((plan) => {
+        const count = planCounts[plan.planId] || 0;
+        return {
+          planId: plan.planId,
+          planName: plan.name,
+          activeCount: count,
+          percentage: Math.round((count / totalActiveCount) * 1000) / 10
+        };
+      }),
+      ...Object.entries(planCounts)
+        .filter(([planId]) => !knownPlanIds.has(planId))
+        .map(([planId, count]) => ({
+          planId,
+          planName: planId.replace(/_/g, ' '),
+          activeCount: count,
+          percentage: Math.round((count / totalActiveCount) * 1000) / 10
+        }))
+    ];
 
-    // 3. Financial calculations
+    // 3. Financial calculations (single aggregation, no full-document scan)
     const paymentQuery: Record<string, any> = { ...dateQuery };
     if (filters.planId) paymentQuery.planId = filters.planId;
     if (filters.moderatorId) paymentQuery.referredByModeratorId = new mongoose.Types.ObjectId(filters.moderatorId);
 
-    const payments = await PaymentModel.find(paymentQuery);
+    const commQuery: Record<string, any> = { ...dateQuery };
+    if (filters.moderatorId) commQuery.moderatorId = new mongoose.Types.ObjectId(filters.moderatorId);
 
-    let grossSalesUsd = 0;
-    let refundsUsd = 0;
-    let confirmedOrdersCount = 0;
-    let failedOrdersCount = 0;
-    let refundedOrdersCount = 0;
+    const [paymentAgg, commAgg, moderators] = await Promise.all([
+      PaymentModel.aggregate([
+        { $match: paymentQuery },
+        {
+          $group: {
+            _id: null,
+            grossSalesUsd: {
+              $sum: {
+                $cond: [
+                  { $or: [{ $eq: ['$isFulfilled', true] }, { $eq: ['$status', PaymentStatus.FINISHED] }] },
+                  '$priceAmount',
+                  0
+                ]
+              }
+            },
+            refundsUsd: {
+              $sum: { $cond: [{ $eq: ['$status', PaymentStatus.REFUNDED] }, '$priceAmount', 0] }
+            },
+            confirmedOrdersCount: {
+              $sum: {
+                $cond: [
+                  { $or: [{ $eq: ['$isFulfilled', true] }, { $eq: ['$status', PaymentStatus.FINISHED] }] },
+                  1,
+                  0
+                ]
+              }
+            },
+            failedOrdersCount: {
+              $sum: {
+                $cond: [
+                  { $in: ['$status', [PaymentStatus.FAILED, PaymentStatus.EXPIRED]] },
+                  1,
+                  0
+                ]
+              }
+            },
+            refundedOrdersCount: {
+              $sum: { $cond: [{ $eq: ['$status', PaymentStatus.REFUNDED] }, 1, 0] }
+            }
+          }
+        }
+      ]),
+      ReferralCommissionModel.aggregate([
+        { $match: commQuery },
+        { $group: { _id: '$status', totalUsd: { $sum: '$amountUsd' }, count: { $sum: 1 } } }
+      ]),
+      UserModel.find({ role: UserRole.MODERATOR, isDeleted: false })
+        .select('_id name email referralCode')
+        .lean()
+    ]);
 
-    for (const p of payments) {
-      if (p.status === PaymentStatus.FINISHED || p.isFulfilled) {
-        grossSalesUsd += p.priceAmount;
-        confirmedOrdersCount++;
-      } else if (p.status === PaymentStatus.REFUNDED) {
-        refundsUsd += p.priceAmount;
-        refundedOrdersCount++;
-      } else if (p.status === PaymentStatus.FAILED || p.status === PaymentStatus.EXPIRED) {
-        failedOrdersCount++;
-      }
-    }
+    const paymentTotals = paymentAgg[0] || {
+      grossSalesUsd: 0,
+      refundsUsd: 0,
+      confirmedOrdersCount: 0,
+      failedOrdersCount: 0,
+      refundedOrdersCount: 0
+    };
+
+    const grossSalesUsd = paymentTotals.grossSalesUsd || 0;
+    const refundsUsd = paymentTotals.refundsUsd || 0;
+    const confirmedOrdersCount = paymentTotals.confirmedOrdersCount || 0;
+    const failedOrdersCount = paymentTotals.failedOrdersCount || 0;
+    const refundedOrdersCount = paymentTotals.refundedOrdersCount || 0;
 
     // Estimated blockchain and gateway processing network fee (approx 1% of gross)
     const estimatedFeesUsd = Math.round(grossSalesUsd * 0.01 * 100) / 100;
     const netRevenueUsd = Math.round((grossSalesUsd - refundsUsd - estimatedFeesUsd) * 100) / 100;
 
-    // 4. Commission liabilities
-    const commQuery: Record<string, any> = { ...dateQuery };
-    if (filters.moderatorId) commQuery.moderatorId = new mongoose.Types.ObjectId(filters.moderatorId);
-
-    const commissions = await ReferralCommissionModel.find(commQuery);
-
+    // 4. Commission liabilities from the grouped status totals
     let pendingCommissionLiabilitiesUsd = 0;
     let approvedCommissionLiabilitiesUsd = 0;
     let reversedCommissionsUsd = 0;
 
-    for (const c of commissions) {
-      if (c.status === 'PENDING' || c.status === 'ELIGIBLE') {
-        pendingCommissionLiabilitiesUsd += c.amountUsd;
-      } else if (c.status === 'APPROVED' || c.status === 'CREDITED') {
-        approvedCommissionLiabilitiesUsd += c.amountUsd;
-      } else if (c.status === 'REVERSED') {
-        reversedCommissionsUsd += c.amountUsd;
+    for (const row of commAgg) {
+      if (row._id === 'PENDING' || row._id === 'ELIGIBLE') {
+        pendingCommissionLiabilitiesUsd += row.totalUsd || 0;
+      } else if (row._id === 'APPROVED' || row._id === 'CREDITED') {
+        approvedCommissionLiabilitiesUsd += row.totalUsd || 0;
+      } else if (row._id === 'REVERSED') {
+        reversedCommissionsUsd += row.totalUsd || 0;
       }
     }
 
-    // 5. Moderator performance ranking
-    const moderators = await UserModel.find({
-      role: UserRole.MODERATOR,
-      isDeleted: false
-    });
+    // 5. Moderator performance ranking (bulk queries, no N+1)
+    const moderatorIds = moderators.map((mod) => mod._id);
+    const [customerCounts, allModeratorCommissions] = await Promise.all([
+      moderatorIds.length
+        ? UserModel.aggregate([
+            { $match: { referredBy: { $in: moderatorIds }, isDeleted: false } },
+            { $group: { _id: '$referredBy', count: { $sum: 1 } } }
+          ])
+        : [],
+      moderatorIds.length
+        ? ReferralCommissionModel.find({ moderatorId: { $in: moderatorIds } })
+            .select('moderatorId status amountUsd originalPurchaseAmount commissionableAmount')
+            .lean()
+        : []
+    ]);
 
-    const moderatorPerformance = await Promise.all(
-      moderators.map(async (mod) => {
-        const modId = mod._id;
-        const [customerCount, modComms] = await Promise.all([
-          UserModel.countDocuments({ referredBy: modId, isDeleted: false }),
-          ReferralCommissionModel.find({ moderatorId: modId })
-        ]);
+    const customerCountMap = new Map<string, number>();
+    for (const row of customerCounts) {
+      customerCountMap.set(String(row._id), row.count || 0);
+    }
 
-        let attributedSalesCount = 0;
-        let attributedRevenueUsd = 0;
-        let creditedCommissionUsd = 0;
+    const commissionsByModerator = new Map<string, any[]>();
+    for (const commission of allModeratorCommissions as any[]) {
+      const key = String(commission.moderatorId);
+      if (!commissionsByModerator.has(key)) commissionsByModerator.set(key, []);
+      commissionsByModerator.get(key)!.push(commission);
+    }
 
-        for (const mc of modComms) {
-          if (mc.status !== 'REVERSED') {
-            attributedSalesCount++;
-            attributedRevenueUsd += mc.originalPurchaseAmount || mc.commissionableAmount || (mc.amountUsd * 2);
-            if (mc.status === 'CREDITED' || mc.status === 'APPROVED') {
-              creditedCommissionUsd += mc.amountUsd;
-            }
+    const moderatorPerformance = moderators.map((mod) => {
+      const modId: any = mod._id;
+      const modComms = commissionsByModerator.get(String(modId)) || [];
+
+      let attributedSalesCount = 0;
+      let attributedRevenueUsd = 0;
+      let creditedCommissionUsd = 0;
+
+      for (const mc of modComms) {
+        if (mc.status !== 'REVERSED') {
+          attributedSalesCount++;
+          attributedRevenueUsd += mc.originalPurchaseAmount || mc.commissionableAmount || (mc.amountUsd * 2);
+          if (mc.status === 'CREDITED' || mc.status === 'APPROVED') {
+            creditedCommissionUsd += mc.amountUsd;
           }
         }
+      }
 
-        return {
-          moderatorId: modId.toString(),
-          name: mod.name,
-          email: mod.email || '',
-          referralCode: mod.referralCode || '',
-          attributedCustomers: customerCount,
-          attributedSalesCount,
-          attributedRevenueUsd: Math.round(attributedRevenueUsd * 100) / 100,
-          creditedCommissionUsd: Math.round(creditedCommissionUsd * 100) / 100
-        };
-      })
-    );
+      return {
+        moderatorId: modId.toString(),
+        name: mod.name,
+        email: mod.email || '',
+        referralCode: mod.referralCode || '',
+        attributedCustomers: customerCountMap.get(String(modId)) || 0,
+        attributedSalesCount,
+        attributedRevenueUsd: Math.round(attributedRevenueUsd * 100) / 100,
+        creditedCommissionUsd: Math.round(creditedCommissionUsd * 100) / 100
+      };
+    });
 
     return {
       period: {

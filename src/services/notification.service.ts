@@ -5,6 +5,7 @@ import { AuditLogModel } from '../models/AuditLog';
 import { ApiError } from '../utils/apiError';
 import { UserRole } from '../shared/roles';
 import { logger } from '../utils/logger';
+import { cacheKeys, memoryCache } from '../utils/cache';
 
 export class NotificationService {
   /**
@@ -27,6 +28,8 @@ export class NotificationService {
         link,
         metadata
       });
+      memoryCache.del(cacheKeys.userDashboard(userId.toString()));
+      memoryCache.delByPrefix(cacheKeys.userNotifications(userId.toString()));
       return notif;
     } catch (err) {
       logger.error('Failed to create notification', { userId, type, error: err });
@@ -51,30 +54,36 @@ export class NotificationService {
     const limit = Math.min(50, Math.max(1, options.limit || 15));
     const skip = (page - 1) * limit;
 
-    const query: Record<string, any> = {
-      userId: new mongoose.Types.ObjectId(userId)
-    };
+    return memoryCache.getOrSet(
+      `${cacheKeys.userNotifications(userId)}:${page}:${limit}:${options.unreadOnly ? 'unread' : 'all'}`,
+      15,
+      async () => {
+        const query: Record<string, any> = {
+          userId: new mongoose.Types.ObjectId(userId)
+        };
 
-    if (options.unreadOnly) {
-      query.isRead = false;
-    }
+        if (options.unreadOnly) {
+          query.isRead = false;
+        }
 
-    const [notifications, total, unreadCount] = await Promise.all([
-      NotificationModel.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
-      NotificationModel.countDocuments(query),
-      NotificationModel.countDocuments({
-        userId: new mongoose.Types.ObjectId(userId),
-        isRead: false
-      })
-    ]);
+        const [notifications, total, unreadCount] = await Promise.all([
+          NotificationModel.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+          NotificationModel.countDocuments(query),
+          NotificationModel.countDocuments({
+            userId: new mongoose.Types.ObjectId(userId),
+            isRead: false
+          })
+        ]);
 
-    return {
-      notifications,
-      total,
-      unreadCount,
-      page,
-      totalPages: Math.ceil(total / limit) || 1
-    };
+        return {
+          notifications: notifications as any,
+          unreadCount,
+          page,
+          total,
+          totalPages: Math.ceil(total / limit) || 1
+        };
+      }
+    );
   }
 
   /**
@@ -94,6 +103,8 @@ export class NotificationService {
       notif.isRead = true;
       notif.readAt = new Date();
       await notif.save();
+      memoryCache.del(cacheKeys.userDashboard(userId));
+      memoryCache.delByPrefix(cacheKeys.userNotifications(userId));
     }
 
     return notif;
@@ -116,6 +127,8 @@ export class NotificationService {
       }
     );
 
+    memoryCache.del(cacheKeys.userDashboard(userId));
+    memoryCache.delByPrefix(cacheKeys.userNotifications(userId));
     return { modifiedCount: res.modifiedCount };
   }
 
@@ -168,6 +181,8 @@ export class NotificationService {
     });
 
     logger.info(`Main Admin ${adminEmail} broadcast announcement "${title}" to ${docs.length} recipients`);
+    memoryCache.delByPrefix('user:');
+    memoryCache.delByPrefix('moderator:');
     return { recipientCount: docs.length };
   }
 }

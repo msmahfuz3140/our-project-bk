@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { cacheKeys, memoryCache } from '../utils/cache';
 
 export type AuditActionType =
   | 'USER_BLOCK'
@@ -29,6 +30,7 @@ export type AuditActionType =
   | 'PLAN_CONFIG_UPDATE'
   | 'BROADCAST_ANNOUNCEMENT'
   | 'FINANCIAL_PAYOUT'
+  | 'CONTACT_MESSAGE_STATUS'
   | 'MAIN_ADMIN_BOOTSTRAP';
 
 export interface IAuditLog extends Document {
@@ -114,6 +116,19 @@ AuditLogSchema.pre('save', function (next) {
     return;
   }
   next();
+});
+
+// Any audited administrative action may change dashboard or moderator
+// statistics. Invalidate the relevant server caches immediately.
+AuditLogSchema.post('save', function () {
+  memoryCache.del(cacheKeys.adminDashboard);
+  memoryCache.del(cacheKeys.adminSystemHealth);
+  memoryCache.del(cacheKeys.adminUserSummary);
+  memoryCache.delByPrefix('moderator:');
+  if (this.targetUserId) {
+    memoryCache.del(cacheKeys.authContext(this.targetUserId.toString()));
+    memoryCache.del(cacheKeys.userDashboard(this.targetUserId.toString()));
+  }
 });
 
 AuditLogSchema.pre(['updateOne', 'updateMany', 'findOneAndUpdate', 'findOneAndReplace'], function (next) {

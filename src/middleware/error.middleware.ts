@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
+import { isProductionRuntime } from '../config/env';
 import { ZodError } from 'zod';
 
 export function errorHandler(
@@ -50,7 +51,7 @@ export function errorHandler(
     success: false,
     error: {
       code: 'INTERNAL_SERVER_ERROR',
-      message: process.env.NODE_ENV === 'production'
+      message: isProductionRuntime
         ? 'An unexpected error occurred. Please try again later.'
         : err.message
     }

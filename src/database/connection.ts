@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { env } from '../config/env';
+import { isProductionRuntime } from '../config/env';
 import { logger } from '../utils/logger';
 
 class Database {
@@ -35,12 +36,15 @@ class Database {
       });
 
       await mongoose.connect(env.MONGODB_URI, {
-        serverSelectionTimeoutMS: env.NODE_ENV === 'production' ? 10000 : 3000,
+        serverSelectionTimeoutMS: isProductionRuntime ? 10000 : 3000,
         connectTimeoutMS: 10000,
         socketTimeoutMS: 45000,
-        maxPoolSize: 50,
-        minPoolSize: env.NODE_ENV === 'production' ? 5 : 1,
-        autoIndex: env.NODE_ENV !== 'production'
+        // Serverless-safe pool sizing: many function instances should not each
+        // open a 50-connection pool against MongoDB Atlas.
+        maxPoolSize: isProductionRuntime ? 10 : 20,
+        minPoolSize: isProductionRuntime ? 0 : 1,
+        maxIdleTimeMS: 60000,
+        autoIndex: !isProductionRuntime
       });
 
       this.isConnecting = false;

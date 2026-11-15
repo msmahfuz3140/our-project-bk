@@ -8,12 +8,12 @@ import { logger } from '../utils/logger';
 
 export class PaymentController {
   /**
-   * Create a new purchase order
+   * Create a new purchase order (server-authoritative plan price).
    */
   async createOrder(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { planId, payCurrency } = req.body;
-      if (!planId) {
+      const { planId, payCurrency } = req.body || {};
+      if (!planId || typeof planId !== 'string') {
         throw ApiError.badRequest('planId is required to create a purchase order');
       }
 
@@ -28,32 +28,17 @@ export class PaymentController {
   }
 
   /**
-   * Get single order status for the checkout screen
+   * Get a single order status by order number (legacy checkout route).
    */
   async getOrder(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { orderId } = req.params;
       const isSuperAdmin = req.user!.role === UserRole.SUPER_ADMIN;
-      const order = await paymentService.getOrder(orderId as string, req.user!.id, isSuperAdmin);
+      const order = await paymentService.getPaymentDetails(orderId as string, req.user!.id, isSuperAdmin);
 
       res.status(200).json({
         success: true,
-        data: {
-          orderId: order.orderId,
-          paymentId: order.paymentId,
-          planId: order.planId,
-          planName: order.planName,
-          priceUsd: order.priceAmount,
-          priceCents: order.priceCents,
-          duration: order.duration,
-          durationDays: order.durationDays,
-          status: order.status,
-          isFulfilled: order.isFulfilled,
-          actuallyPaid: order.actuallyPaid,
-          payCurrency: order.payCurrency,
-          checkoutUrl: order.checkoutUrl,
-          createdAt: order.createdAt
-        }
+        data: order
       });
     } catch (error) {
       next(error);
@@ -61,23 +46,32 @@ export class PaymentController {
   }
 
   /**
-   * NOWPayments IPN Webhook Receiver
-   * Processes server-to-server callback notifications
+   * Get payment status by order number, provider payment id, or invoice id.
    */
-  async handleIpn(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getPaymentById(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const signature = req.headers['x-nowpayments-sig'] as string | undefined;
-      const payload = req.body;
+      const { id } = req.params;
+      const isSuperAdmin = req.user!.role === UserRole.SUPER_ADMIN;
+      const payment = await paymentService.getPaymentDetails(id as string, req.user!.id, isSuperAdmin);
 
-      logger.info('NOWPayments IPN callback received', {
-        orderId: payload?.order_id,
-        paymentId: payload?.payment_id,
-        status: payload?.payment_status
+      res.status(200).json({
+        success: true,
+        data: payment
       });
+    } catch (error) {
+      next(error);
+    }
+  }
 
-      const result = await paymentService.processIpnCallback(payload, signature);
+  /**
+   * Authenticated user's own payment history.
+   */
+  async getHistory(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const page = req.query.page ? Number(req.query.page) : 1;
+      const limit = req.query.limit ? Number(req.query.limit) : 20;
+      const result = await paymentService.getPaymentHistory(req.user!.id, page, limit);
 
-      // Always respond with 200 OK so NOWPayments acknowledges receipt
       res.status(200).json({
         success: true,
         data: result
@@ -88,7 +82,42 @@ export class PaymentController {
   }
 
   /**
-   * Get supported crypto currencies
+   * NOWPayments IPN Webhook Receiver.
+   *
+   * Public by design: NOWPayments cannot supply a user session. The request is
+   * authenticated cryptographically through x-nowpayments-sig instead.
+   */
+  async handleIpn(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const signatureHeader = req.headers['x-nowpayments-sig'];
+      const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+      const payload = req.body;
+
+      logger.info('NOWPayments IPN callback received', {
+        orderId: payload?.order_id,
+        paymentId: payload?.payment_id,
+        status: payload?.payment_status,
+        hasSignature: Boolean(signature),
+        ip: req.ip
+      });
+
+      const result = await paymentService.processIpnCallback(payload, signature);
+
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({
+        success: true,
+        data: result
+      });
+    } catch (error) {
+      // Invalid signatures and malformed payloads are handled centrally and
+      // return 4xx without exposing internals. Provider/network failures
+      // return 5xx so NOWPayments retries the notification.
+      next(error);
+    }
+  }
+
+  /**
+   * Get supported crypto currencies.
    */
   async getCurrencies(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -127,12 +156,37 @@ export class PaymentController {
     }
   }
 
+  async getAdminOrderDetails(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { orderId } = req.params;
+      const result = await paymentService.getAdminOrderDetails(orderId as string);
+      res.status(200).json({
+        success: true,
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   async getAdminSummary(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const summary = await paymentService.getAdminSummary();
       res.status(200).json({
         success: true,
         data: summary
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async getAdminHealth(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const health = await paymentService.getAdminPaymentHealth();
+      res.status(200).json({
+        success: true,
+        data: health
       });
     } catch (error) {
       next(error);

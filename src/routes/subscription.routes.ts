@@ -13,6 +13,11 @@ router.get('/my-subscription', requireAuth, (req, res, next) =>
   subscriptionController.getMySubscription(req, res, next)
 );
 
+// Specification alias: GET /api/v1/subscriptions/me
+router.get('/me', requireAuth, (req, res, next) =>
+  subscriptionController.getMySubscription(req, res, next)
+);
+
 router.get('/access-status', requireAuth, (req, res, next) =>
   subscriptionController.getAccessStatus(req, res, next)
 );

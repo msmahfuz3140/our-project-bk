@@ -271,7 +271,7 @@ export class SubscriptionAccessService {
       }
     });
 
-    logger.info(`Main Admin ${adminId} manually granted ${plan.id} to ${input.targetEmail}. Secret code: ${secretCode}`);
+    logger.info(`Main Admin ${adminId} manually granted ${plan.id} to ${input.targetEmail}.`);
 
     if (targetUser.email) {
       await emailService.sendVipSecretCodeEmail({

@@ -4,6 +4,7 @@ import { AuditLogModel } from '../models/AuditLog';
 import { OtpVerificationModel } from '../models/OtpVerification';
 import { PaymentModel } from '../models/Payment';
 import { ReferralCommissionModel } from '../models/ReferralCommission';
+import { SecurityLogModel } from '../models/SecurityLog';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 
@@ -20,6 +21,8 @@ export class SecurityService {
       suspendedCount,
       otpAttempts24h,
       expiredOtps24h,
+      failedLogins24h,
+      recentSecurityEvents,
       recentAuditLogs,
       recentFailedPayments,
       suspiciousReferrals
@@ -28,6 +31,8 @@ export class SecurityService {
       UserModel.countDocuments({ accountStatus: AccountStatus.SUSPENDED }),
       OtpVerificationModel.countDocuments({ attempts: { $gte: 3 } }),
       OtpVerificationModel.countDocuments({ expiresAt: { $gte: last24h } }),
+      SecurityLogModel.countDocuments({ eventType: 'LOGIN_FAILED', createdAt: { $gte: last24h } }),
+      SecurityLogModel.find().sort({ createdAt: -1 }).limit(20).lean(),
       AuditLogModel.find({ createdAt: { $gte: last7d } }).sort({ createdAt: -1 }).limit(20),
       PaymentModel.find({ status: { $in: ['FAILED', 'EXPIRED'] }, createdAt: { $gte: last24h } })
         .populate('userId', 'email name')
@@ -44,14 +49,20 @@ export class SecurityService {
       suspendedCount,
       otpAttempts24h,
       expiredOtps24h,
+      failedLogins24h,
+      recentSecurityEvents,
       recentAuditLogs,
       recentFailedPayments,
       suspiciousReferrals,
       systemHealth: {
-        twoFactorEnforcedForAdmins: true,
-        cookieSecurity: 'SameSite=Lax; Secure',
-        tokenAlgorithm: 'HS256 (32+ bytes secret)',
-        ipnSignatureVerification: 'HMAC-SHA512 TimingSafe'
+        twoFactorEnforcedForAdmins: false,
+        twoFactorSupported: false,
+        passwordHashing: 'bcrypt (cost factor 12)',
+        plaintextPasswordsStored: false,
+        cookieSecurity: 'JWT bearer tokens with SameSite=Lax cookie fallback; Better Auth sessions use HttpOnly cookies',
+        tokenAlgorithm: 'HS256 (32+ byte secret)',
+        ipnSignatureVerification: 'HMAC-SHA512 TimingSafe',
+        rateLimiting: 'Login, registration, OTP, password reset, payout and webhook limits enabled'
       }
     };
   }
@@ -79,6 +90,39 @@ export class SecurityService {
         attempts: otp.attempts,
         createdAt: otp.createdAt,
         description: `Identifier ${otp.target} reached ${otp.attempts} verification attempts.`
+      });
+    }
+
+    // 1b. Failed-login burst detection (privacy-safe: grouped email/identifier)
+    const failedLoginBursts = await SecurityLogModel.aggregate([
+      {
+        $match: {
+          eventType: 'LOGIN_FAILED',
+          createdAt: { $gte: last48h }
+        }
+      },
+      {
+        $group: {
+          _id: '$email',
+          failures: { $sum: 1 },
+          lastFailureAt: { $max: '$createdAt' }
+        }
+      },
+      { $match: { failures: { $gte: 5 } } },
+      { $sort: { failures: -1 } },
+      { $limit: 10 }
+    ]);
+
+    for (const burst of failedLoginBursts) {
+      alerts.push({
+        id: `ALERT_LOGIN_${burst._id || 'unknown'}`,
+        type: 'FAILED_LOGIN_BURST',
+        severity: burst.failures >= 10 ? 'HIGH' : 'MEDIUM',
+        title: 'Repeated failed login attempts detected',
+        identifier: burst._id || 'Unknown identifier',
+        attempts: burst.failures,
+        createdAt: burst.lastFailureAt,
+        description: `${burst.failures} failed login attempts were recorded for this identifier in the last 48 hours.`
       });
     }
 
@@ -122,6 +166,14 @@ export class SecurityService {
     const revokedAt = new Date();
     user.sessionsRevokedAt = revokedAt;
     await user.save();
+
+    await SecurityLogModel.create({
+      userId: user._id,
+      email: user.email,
+      eventType: 'SESSION_REVOKED',
+      success: true,
+      metadata: { revokedByAdminId: adminId, reason: reason || 'Administrative session revocation' }
+    }).catch(() => null);
 
     await AuditLogModel.create({
       action: 'ADMIN_SETTING_CHANGE',

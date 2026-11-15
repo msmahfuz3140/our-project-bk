@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import { emailService } from '../services/email.service';
 import { smsService } from '../services/sms.service';
 import { env } from '../config/env';
+import { isProductionRuntime } from '../config/env';
 
 /**
  * Better Auth Server Configuration
@@ -16,6 +17,8 @@ export function getBetterAuth(): any {
   const secret = env.BETTER_AUTH_SECRET || env.JWT_SECRET;
   const baseURL = env.BETTER_AUTH_URL || env.BACKEND_URL || `http://localhost:${env.PORT}`;
   const trustedOrigins = Array.from(new Set([
+    'https://accuracy.tools',
+    'https://www.accuracy.tools',
     'https://rouletteaccuracy.com',
     'https://www.rouletteaccuracy.com',
     'http://localhost:3000',
@@ -28,6 +31,18 @@ export function getBetterAuth(): any {
     secret,
     baseURL,
     trustedOrigins,
+    session: {
+      expiresIn: 60 * 60 * 24 * 7,
+      updateAge: 60 * 60 * 24
+    },
+    advanced: {
+      useSecureCookies: isProductionRuntime,
+      defaultCookieAttributes: {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: isProductionRuntime
+      }
+    },
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false

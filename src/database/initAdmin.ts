@@ -7,10 +7,17 @@ import { logger } from '../utils/logger';
 
 export async function initializeAuthoritativeAdmin(): Promise<void> {
   try {
-    // 1. Remove old demo admin accounts from database if any exist
-    await UserModel.deleteMany({
-      email: { $in: ['demo.admin@rouletteaccuracy.com', 'admin@gmail.com', 'admin1@rouletteaccuracy.com'] }
-    });
+    // 1. Do not silently delete legacy/demo accounts. Removing users is a
+    // destructive migration and must be performed explicitly by an operator.
+    const legacyDemoAdmins = await UserModel.find({
+      email: { $in: ['demo.admin@rouletteaccuracy.com', 'admin@gmail.com', 'admin1@rouletteaccuracy.com'] },
+      role: UserRole.SUPER_ADMIN
+    }).select('email').lean();
+    if (legacyDemoAdmins.length > 0) {
+      logger.warn('Legacy demo admin accounts detected. No automatic deletion was performed; review them in the admin panel.', {
+        accounts: legacyDemoAdmins.map((admin) => admin.email)
+      });
+    }
 
     // 2. Check if a Super Admin already exists in the database
     const existingSuperAdmin = await UserModel.findOne({ role: UserRole.SUPER_ADMIN });
@@ -25,8 +32,15 @@ export async function initializeAuthoritativeAdmin(): Promise<void> {
       return;
     }
 
-    const defaultPassword = process.env.INITIAL_ADMIN_PASSWORD || 'Admin_Init_1234!';
-    const passwordHash = await hashPassword(defaultPassword);
+    const initialPassword = (process.env.INITIAL_ADMIN_PASSWORD || '').trim();
+    if (initialPassword.length < 12 || /^change_this/i.test(initialPassword)) {
+      logger.error(
+        'No Super Admin exists, but INITIAL_ADMIN_PASSWORD is missing, placeholder, or shorter than 12 characters. Automatic admin creation was skipped. Set a strong INITIAL_ADMIN_PASSWORD or provision an admin explicitly.'
+      );
+      return;
+    }
+
+    const passwordHash = await hashPassword(initialPassword);
 
     const admin = await UserModel.create({
       name: 'Super Admin',

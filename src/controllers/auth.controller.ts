@@ -5,7 +5,7 @@ import { AuthenticatedRequest } from '../middleware/auth.middleware';
 export class AuthController {
   async register(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await authService.register(req.body, req.ip);
+      const result = await authService.register(req.body, req.ip, req.get('user-agent') || undefined);
       res.status(201).json({
         success: true,
         data: result
@@ -17,7 +17,7 @@ export class AuthController {
 
   async login(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await authService.login(req.body);
+      const result = await authService.login(req.body, req.ip, req.get('user-agent') || undefined);
       res.status(200).json({
         success: true,
         data: result
@@ -67,7 +67,7 @@ export class AuthController {
 
   async resetPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await authService.resetPassword(req.body);
+      const result = await authService.resetPassword(req.body, req.ip, req.get('user-agent') || undefined);
       res.status(200).json({
         success: true,
         message: result.message
@@ -79,7 +79,7 @@ export class AuthController {
 
   async changePassword(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      await authService.changePassword(req.user!.id, req.body);
+      await authService.changePassword(req.user!.id, req.body, req.ip, req.get('user-agent') || undefined);
       res.status(200).json({
         success: true,
         message: 'Password successfully updated'

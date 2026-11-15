@@ -3,8 +3,61 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface IFaqItem {
   question: string;
   answer: string;
+  category?: string;
   order: number;
 }
+
+export const DEFAULT_SITE_FAQS: IFaqItem[] = [
+  {
+    question: 'How does the prediction software work?',
+    answer: 'The platform ingests live wheel telemetry and calculates sector probabilities based on physical wheel biases, dealer signature deviations, and offset patterns on European single-zero wheels.',
+    category: 'Platform',
+    order: 1
+  },
+  {
+    question: 'Does the software guarantee winning spins?',
+    answer: 'No. European Roulette retains an inherent 2.70% house edge. Our software delivers mathematical edge identification, not absolute outcome prediction.',
+    category: 'Platform',
+    order: 2
+  },
+  {
+    question: 'Which cryptocurrencies are supported for subscriptions?',
+    answer: 'We accept USDT (TRC-20, ERC-20, BEP-20), BTC, ETH, TRX, LTC, SOL, DOGE, and USDC via the NOWPayments gateway. Premium activates only after the signed IPN reaches final settlement.',
+    category: 'Payments',
+    order: 3
+  },
+  {
+    question: 'How fast does my subscription activate after payment?',
+    answer: 'Subscriptions are activated automatically after the NOWPayments signed IPN reaches the final finished state and the backend independently verifies the payment. Blockchain confirmation alone does not unlock Premium.',
+    category: 'Payments',
+    order: 4
+  },
+  {
+    question: 'How does the Moderator referral commission work?',
+    answer: 'Approved Moderators receive unique referral links. When a referred user purchases a plan, the backend records a 50% commission ledger entry. Referral attribution is server-validated and duplicate commission records are prevented.',
+    category: 'Referrals',
+    order: 5
+  },
+  {
+    question: 'Does the platform offer gambling or withdrawals?',
+    answer: 'No. This is a statistical analytics SaaS platform. There is no betting mechanic, no wallet custody, no user balance, and no withdrawal feature.',
+    category: 'Platform',
+    order: 6
+  },
+  {
+    question: 'How is subscription expiration calculated?',
+    answer: 'Monthly and annual plans use UTC calendar-month mathematics. For example, January 31 plus one month ends on February 28, or February 29 in a leap year. Renewals extend from the existing paid-through date so no days are lost.',
+    category: 'Subscriptions',
+    order: 7
+  },
+  {
+    question: 'Can I test the platform before buying a longer plan?',
+    answer: 'The 15 Days Pass provides full live table access for 15 calendar days. It is the lowest-commitment way to evaluate the prediction terminal.',
+    category: 'Subscriptions',
+    order: 8
+  }
+];
+
 
 export interface IWebsiteSettings extends Document {
   siteName: string;
@@ -55,6 +108,7 @@ export interface IWebsiteSettingsModel extends mongoose.Model<IWebsiteSettings> 
 const FaqItemSchema = new Schema<IFaqItem>({
   question: { type: String, required: true },
   answer: { type: String, required: true },
+  category: { type: String, default: 'Platform', trim: true, maxlength: 60 },
   order: { type: Number, default: 0 }
 });
 
@@ -89,8 +143,8 @@ const WebsiteSettingsSchema = new Schema<IWebsiteSettings>(
       discord: { type: String, default: '' }
     },
     homepageContent: {
-      heroTitle: { type: String, default: 'Algorithmic Roulette Intelligence & Statistical Wheel Tracking' },
-      heroSubtitle: { type: String, default: 'Real-time telemetry and pattern identification for European Roulette live tables. Professional grade SaaS analytics.' },
+      heroTitle: { type: String, default: 'Read the wheel. Time the pattern.' },
+      heroSubtitle: { type: String, default: 'Roulette Accuracy turns live European wheel telemetry into a clear, direction-aware precision layer — dealer rhythm, n9 sector mapping and travel mathematics in one place.' },
       announcementBanner: { type: String, default: '' }
     },
     footerContent: {
@@ -99,23 +153,7 @@ const WebsiteSettingsSchema = new Schema<IWebsiteSettings>(
     },
     faqItems: {
       type: [FaqItemSchema],
-      default: [
-        {
-          question: 'How does the prediction software work?',
-          answer: 'The platform ingests live wheel telemetry and calculates sector probabilities based on physical wheel biases, dealer signature deviations, and offset patterns on European single-zero wheels.',
-          order: 1
-        },
-        {
-          question: 'Does the software guarantee winning spins?',
-          answer: 'No. European Roulette retains an inherent 2.70% house edge. Our software delivers mathematical edge identification, not absolute outcome prediction.',
-          order: 2
-        },
-        {
-          question: 'Which cryptocurrencies are supported for subscriptions?',
-          answer: 'We accept USDT (TRC-20, ERC-20, BEP-20), BTC, ETH, TRX, LTC, SOL, DOGE, and USDC via NOWPayments gateway.',
-          order: 3
-        }
-      ]
+      default: DEFAULT_SITE_FAQS
     },
     legalPolicies: {
       termsAndConditions: { type: String, default: '' },

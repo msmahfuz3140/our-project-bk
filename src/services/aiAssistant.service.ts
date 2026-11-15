@@ -4,7 +4,7 @@ import { UserModel } from '../models/User';
 import { ReferralCommissionModel } from '../models/ReferralCommission';
 import { AuditLogModel } from '../models/AuditLog';
 import { OtpVerificationModel } from '../models/OtpVerification';
-import { PLANS_ARRAY } from '../shared/plans';
+import { PlanModel } from '../models/Plan';
 
 export interface AiQueryResult {
   answer: string;
@@ -82,8 +82,10 @@ export class AiAssistantService {
 
       const topPlanId = planAgg[0]._id;
       const topCount = planAgg[0].count;
-      const matchingPlan = PLANS_ARRAY.find(p => p.id === topPlanId);
-      const planName = matchingPlan ? matchingPlan.name : topPlanId;
+      const matchingPlan: any = topPlanId
+        ? await PlanModel.findOne({ planId: topPlanId }).select('name').lean()
+        : null;
+      const planName = matchingPlan?.name || topPlanId;
 
       return {
         answer: `The most popular tier is "${planName}" with ${topCount} total activations recorded, followed by ${planAgg.slice(1).map(p => `${p._id} (${p.count})`).join(', ') || 'no other tiers'}.`,

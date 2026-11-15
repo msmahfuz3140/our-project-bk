@@ -1,5 +1,6 @@
 import nodemailer, { Transporter } from 'nodemailer';
 import { env } from '../config/env';
+import { isProductionRuntime } from '../config/env';
 import { logger } from '../utils/logger';
 import { ApiError } from '../utils/apiError';
 
@@ -59,7 +60,7 @@ export class EmailService {
         return true;
       } catch (smtpErr) {
         logger.error(`SMTP delivery error sending to ${to}:`, smtpErr);
-        if (env.NODE_ENV === 'production' && !env.EMAIL_PROVIDER_API_KEY) {
+        if (isProductionRuntime && !env.EMAIL_PROVIDER_API_KEY) {
           throw ApiError.internal('SMTP delivery failed. Please verify email configuration.');
         }
       }
@@ -89,24 +90,27 @@ export class EmailService {
           throw ApiError.internal('Failed to dispatch verification email from provider');
         }
 
-        logger.info(`Email successfully dispatched via provider API to: ${to}`, { subject });
+        logger.info(`Email successfully dispatched via provider API to: ${to}`);
         return true;
       } catch (error) {
         logger.error(`Email dispatch error to: ${to}`, error);
-        if (env.NODE_ENV === 'production') {
+        if (isProductionRuntime) {
           throw ApiError.internal('Email service error. Verification code could not be sent.');
         }
       }
     }
 
-    // 3. In development or test mode (or when SMTP credentials haven't been added yet): Safe local simulation
-    logger.info(`📧 [EMAIL NOTIFICATION] (Target: ${to})`);
-    logger.info(`Subject: ${subject}`);
-    logger.info(`Content:\n${text}`);
-    if (!env.SMTP_USER && env.NODE_ENV === 'production') {
-      logger.warn('SMTP credentials not configured in production. Add SMTP_USER and SMTP_PASS in .env to dispatch live emails.');
+    // 3. Development/test-only local simulation. Never print verification
+    // codes, reset codes, or activation secrets in production logs.
+    if (!isProductionRuntime) {
+      logger.info(`[EMAIL NOTIFICATION] (Target: ${to})`);
+      logger.info(`Subject: ${subject}`);
+      logger.info(`Content:\n${text}`);
+      return true;
     }
-    return true;
+
+    logger.warn('Email delivery is not configured in production. No credentials were logged.');
+    return false;
   }
 
   async sendVerificationOtp(to: string, code: string, name?: string): Promise<boolean> {

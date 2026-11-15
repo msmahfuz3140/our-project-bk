@@ -1,9 +1,11 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { env } from '../config/env';
 import { userRepository } from '../repositories/user.repository';
 import { subscriptionRepository } from '../repositories/subscription.repository';
 import { OtpVerificationModel } from '../models/OtpVerification';
+import { SecurityLogModel } from '../models/SecurityLog';
 import { AuditLogModel } from '../models/AuditLog';
 import { AccountStatus } from '../models/User';
 import { hashPassword, comparePassword, generateOtpCode, generateRandomString } from '../utils/crypto';
@@ -25,20 +27,78 @@ import {
 } from '../shared/auth';
 import { UserRole } from '../shared/roles';
 import { logger } from '../utils/logger';
+import { cacheKeys, memoryCache } from '../utils/cache';
 
 export class AuthService {
-  private hashOtp(code: string): string {
-    return crypto.createHash('sha256').update(code.trim()).digest('hex');
+  private hashOtp(code: string, target: string): string {
+    return crypto
+      .createHmac('sha256', env.JWT_SECRET)
+      .update(`${target.toLowerCase().trim()}:${code.trim()}`)
+      .digest('hex');
   }
 
-  async register(input: RegisterInput, ip?: string): Promise<AuthResponse> {
-    const { name, email, password, referralCode } = input;
+  private async logSecurityEvent(params: {
+    userId?: string | mongoose.Types.ObjectId;
+    email?: string;
+    eventType: 'LOGIN_SUCCESS' | 'LOGIN_FAILED' | 'LOGIN_BLOCKED' | 'ACCOUNT_REGISTERED' | 'PASSWORD_RESET' | 'PASSWORD_CHANGED';
+    success: boolean;
+    ip?: string;
+    userAgent?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    try {
+      await SecurityLogModel.create({
+        userId: params.userId,
+        email: params.email?.toLowerCase().trim(),
+        eventType: params.eventType,
+        success: params.success,
+        ip: params.ip,
+        userAgent: params.userAgent?.slice(0, 500),
+        metadata: params.metadata
+      });
+    } catch (error) {
+      logger.debug('Failed to persist security event', { error: String(error) });
+    }
+  }
+
+  async register(input: RegisterInput, ip?: string, userAgent?: string): Promise<AuthResponse> {
+    const { name, email, password, referralCode, phone } = input;
 
     if (!email || !email.trim()) {
       throw ApiError.badRequest('A valid email address is required for registration');
     }
 
     const normalizedEmail = email.toLowerCase().trim();
+    let normalizedPhone: string | undefined;
+    if (phone && phone.trim() !== '') {
+      try {
+        normalizedPhone = normalizePhoneNumber(phone.trim());
+      } catch {
+        throw ApiError.badRequest('Please provide a valid phone number in international format.');
+      }
+      const existingPhone = await userRepository.findByPhone(normalizedPhone);
+      if (existingPhone) {
+        const attemptedReferral = (referralCode || '').trim().toUpperCase();
+        if (
+          existingPhone.role === UserRole.MODERATOR &&
+          existingPhone.referralCode &&
+          existingPhone.referralCode.toUpperCase() === attemptedReferral
+        ) {
+          await AuditLogModel.create({
+            action: 'REFERRAL_FRAUD_FLAG',
+            adminId: existingPhone._id,
+            adminEmail: existingPhone.email || 'moderator@rouletteaccuracy.com',
+            reason: 'Self-referral attempt detected during account registration',
+            details: {
+              referralCode: existingPhone.referralCode,
+              moderatorId: existingPhone._id.toString(),
+              matchedPhone: true
+            }
+          }).catch(err => logger.error('Failed to log referral fraud audit', err));
+        }
+        throw ApiError.conflict('An account with this phone number already exists');
+      }
+    }
 
     // Check optional referral code with fraud & validity checks
     let referredById: string | undefined;
@@ -56,13 +116,18 @@ export class AuthService {
         } else if (referrer.accountStatus !== AccountStatus.ACTIVE || !referrer.isActive || referrer.isDeleted) {
           logger.warn(`Referral rejected: Moderator ${referrer._id} is inactive, suspended, or blocked.`);
         } else {
-          // 2. Self-referral prevention
+          // 2. Self-referral prevention (email alias + phone)
           const isSelfEmail = referrer.email && (
             normalizedEmail === referrer.email ||
             normalizedEmail.replace(/\+.*@/, '@') === referrer.email.replace(/\+.*@/, '@')
           );
+          const isSelfPhone = Boolean(
+            normalizedPhone &&
+            referrer.phone &&
+            normalizedPhone === referrer.phone
+          );
 
-          if (isSelfEmail) {
+          if (isSelfEmail || isSelfPhone) {
             logger.warn(`Referral fraud flag: Self-referral attempt detected for moderator ${referrer._id}`);
             await AuditLogModel.create({
               action: 'REFERRAL_FRAUD_FLAG',
@@ -100,8 +165,8 @@ export class AuthService {
     const user = await userRepository.create({
       name: (name && name.trim()) || 'Member',
       email: normalizedEmail,
+      phone: normalizedPhone,
       passwordHash,
-      plainPassword: password,
       role,
       isEmailVerified: true,
       isPhoneVerified: false,
@@ -133,6 +198,20 @@ export class AuthService {
       expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn']
     });
 
+    await this.logSecurityEvent({
+      userId: user._id,
+      email: user.email,
+      eventType: 'ACCOUNT_REGISTERED',
+      success: true,
+      ip,
+      userAgent,
+      metadata: { referralApplied: Boolean(referredById) }
+    });
+
+    memoryCache.del(cacheKeys.adminDashboard);
+    memoryCache.del(cacheKeys.adminSystemHealth);
+    memoryCache.del(cacheKeys.adminUserSummary);
+
     return {
       user: this.mapToAuthUser(user, false),
       token,
@@ -140,7 +219,7 @@ export class AuthService {
     };
   }
 
-  async login(input: LoginInput): Promise<AuthResponse> {
+  async login(input: LoginInput, ip?: string, userAgent?: string): Promise<AuthResponse> {
     const { identifier, password } = input;
     const cleanId = identifier.trim();
 
@@ -157,12 +236,49 @@ export class AuthService {
 
     const user = await userRepository.findByIdentifier(lookupTarget, cleanId);
     if (!user) {
+      await this.logSecurityEvent({
+        email: cleanId,
+        eventType: 'LOGIN_FAILED',
+        success: false,
+        ip,
+        userAgent,
+        metadata: { reason: 'UNKNOWN_IDENTIFIER' }
+      });
       throw ApiError.unauthorized('Invalid email/phone or password');
     }
 
     const isMatch = await comparePassword(password, user.passwordHash);
     if (!isMatch) {
+      await this.logSecurityEvent({
+        userId: user._id,
+        email: user.email,
+        eventType: 'LOGIN_FAILED',
+        success: false,
+        ip,
+        userAgent,
+        metadata: { reason: 'INVALID_PASSWORD' }
+      });
       throw ApiError.unauthorized('Invalid email/phone or password');
+    }
+
+    if (
+      user.isDeleted ||
+      user.accountStatus === AccountStatus.BLOCKED ||
+      (user.accountStatus === AccountStatus.SUSPENDED &&
+        (!user.suspendedUntil || user.suspendedUntil > new Date()))
+    ) {
+      await this.logSecurityEvent({
+        userId: user._id,
+        email: user.email,
+        eventType: 'LOGIN_BLOCKED',
+        success: false,
+        ip,
+        userAgent,
+        metadata: { accountStatus: user.accountStatus }
+      });
+      throw ApiError.forbidden(
+        user.statusReason || 'This account is currently blocked or suspended. Please contact support.'
+      );
     }
 
     // Auto-verify user if unverified so verification never blocks access
@@ -180,6 +296,15 @@ export class AuthService {
 
     const token = jwt.sign({ userId: user._id.toString() }, env.JWT_SECRET, {
       expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn']
+    });
+
+    await this.logSecurityEvent({
+      userId: user._id,
+      email: user.email,
+      eventType: 'LOGIN_SUCCESS',
+      success: true,
+      ip,
+      userAgent
     });
 
     return {
@@ -212,9 +337,8 @@ export class AuthService {
       throw ApiError.badRequest('Maximum verification attempts exceeded. Code has been invalidated. Please request a new code.');
     }
 
-    const providedHash = this.hashOtp(code);
-    const isDevMatch = env.NODE_ENV === 'development' && (code === '314031' || code === '123456');
-    if (record.codeHash !== providedHash && !isDevMatch) {
+    const providedHash = this.hashOtp(code, cleanTarget);
+    if (record.codeHash !== providedHash) {
       record.attempts += 1;
       await record.save();
       const remaining = 5 - record.attempts;
@@ -280,13 +404,13 @@ export class AuthService {
     );
 
     const rawOtp = generateOtpCode(6);
-    const codeHash = this.hashOtp(rawOtp);
+    const codeHash = this.hashOtp(rawOtp, cleanTarget);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await OtpVerificationModel.create({
       target: cleanTarget,
       codeHash,
-      rawCodeDev: env.NODE_ENV === 'development' ? rawOtp : undefined,
+      rawCodeDev: env.NODE_ENV === 'test' ? rawOtp : undefined,
       purpose,
       expiresAt,
       lastSentAt: now,
@@ -318,13 +442,13 @@ export class AuthService {
     );
 
     const rawOtp = generateOtpCode(6);
-    const codeHash = this.hashOtp(rawOtp);
+    const codeHash = this.hashOtp(rawOtp, cleanTarget);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await OtpVerificationModel.create({
       target: cleanTarget,
       codeHash,
-      rawCodeDev: env.NODE_ENV === 'development' ? rawOtp : undefined,
+      rawCodeDev: env.NODE_ENV === 'test' ? rawOtp : undefined,
       purpose: OtpPurpose.PASSWORD_RESET,
       expiresAt,
       lastSentAt: new Date(),
@@ -340,7 +464,7 @@ export class AuthService {
     return { message: 'If an account exists with this email or phone number, a verification code has been dispatched.' };
   }
 
-  async resetPassword(input: ResetPasswordInput): Promise<{ success: boolean; message: string }> {
+  async resetPassword(input: ResetPasswordInput, ip?: string, userAgent?: string): Promise<{ success: boolean; message: string }> {
     const { target, code, newPassword } = input;
     const cleanTarget = target.toLowerCase().trim();
     const now = new Date();
@@ -362,7 +486,7 @@ export class AuthService {
       throw ApiError.badRequest('Maximum attempts exceeded. Please request a new password reset code.');
     }
 
-    const providedHash = this.hashOtp(code);
+    const providedHash = this.hashOtp(code, cleanTarget);
     if (record.codeHash !== providedHash) {
       record.attempts += 1;
       await record.save();
@@ -378,13 +502,22 @@ export class AuthService {
     }
 
     user.passwordHash = await hashPassword(newPassword);
-    user.plainPassword = newPassword;
+    user.sessionsRevokedAt = new Date();
     await user.save();
+
+    await this.logSecurityEvent({
+      userId: user._id,
+      email: user.email,
+      eventType: 'PASSWORD_RESET',
+      success: true,
+      ip,
+      userAgent
+    });
 
     return { success: true, message: 'Password has been successfully reset. You can now login.' };
   }
 
-  async changePassword(userId: string, input: ChangePasswordInput): Promise<{ success: boolean }> {
+  async changePassword(userId: string, input: ChangePasswordInput, ip?: string, userAgent?: string): Promise<{ success: boolean }> {
     const user = await userRepository.findById(userId);
     if (!user) {
       throw ApiError.unauthorized('User not found.');
@@ -396,8 +529,16 @@ export class AuthService {
     }
 
     user.passwordHash = await hashPassword(input.newPassword);
-    user.plainPassword = input.newPassword;
     await user.save();
+
+    await this.logSecurityEvent({
+      userId: user._id,
+      email: user.email,
+      eventType: 'PASSWORD_CHANGED',
+      success: true,
+      ip,
+      userAgent
+    });
 
     return { success: true };
   }
@@ -434,6 +575,8 @@ export class AuthService {
     }
 
     await user.save();
+    memoryCache.del(cacheKeys.userDashboard(user._id.toString()));
+    memoryCache.del(cacheKeys.authContext(user._id.toString()));
     const activeSub = await subscriptionRepository.findActiveByUserId(user._id);
     return this.mapToAuthUser(user, !!activeSub);
   }

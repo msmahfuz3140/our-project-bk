@@ -8,7 +8,10 @@ export interface ISubscription extends Document {
   startDate: Date;
   endDate: Date;
   paymentId?: mongoose.Types.ObjectId;
+  orderId?: string;
+  provider?: string;
   providerPaymentId?: string;
+  autoRenew: boolean;
   secretCode?: string;
   isSecretCodeClaimed: boolean;
   secretCodeClaimedAt?: Date;
@@ -58,9 +61,21 @@ const SubscriptionSchema = new Schema<ISubscription>({
     type: Schema.Types.ObjectId,
     ref: 'Payment'
   },
+  orderId: {
+    type: String
+  },
+  provider: {
+    type: String,
+    default: 'NOWPAYMENTS',
+    index: true
+  },
   providerPaymentId: {
     type: String,
     index: true
+  },
+  autoRenew: {
+    type: Boolean,
+    default: false
   },
   secretCode: {
     type: String,
@@ -124,6 +139,8 @@ SubscriptionSchema.index({ userId: 1, status: 1 });
 SubscriptionSchema.index({ userId: 1, endDate: -1 });
 SubscriptionSchema.index({ status: 1, isRevoked: 1, endDate: -1, userId: 1 });
 SubscriptionSchema.index({ planId: 1, status: 1 });
+SubscriptionSchema.index({ paymentId: 1 }, { sparse: true });
+SubscriptionSchema.index({ orderId: 1 }, { sparse: true });
 SubscriptionSchema.index({ createdAt: -1 });
 
 export const SubscriptionModel = mongoose.models.Subscription || mongoose.model<ISubscription>('Subscription', SubscriptionSchema);

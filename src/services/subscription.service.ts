@@ -1,6 +1,4 @@
 import {
-  PLANS_ARRAY,
-  SUBSCRIPTION_PLANS,
   SubscriptionPlan,
   UpdatePlanInput,
   CreatePlanInput
@@ -11,6 +9,7 @@ import { SubscriptionModel } from '../models/Subscription';
 import { UserModel } from '../models/User';
 import { AuditLogModel } from '../models/AuditLog';
 import { ApiError } from '../utils/apiError';
+import { cacheKeys, memoryCache } from '../utils/cache';
 import mongoose from 'mongoose';
 
 export class SubscriptionService {
@@ -21,6 +20,10 @@ export class SubscriptionService {
   private clearPlanCache(): void {
     this.publicPlansCache = null;
     this.allPlansCache = null;
+    memoryCache.del(cacheKeys.publicPlans);
+    memoryCache.del(cacheKeys.adminAllPlans);
+    memoryCache.del(cacheKeys.adminDashboard);
+    memoryCache.del(cacheKeys.publicSettings);
   }
 
   private mapDocToPlan(doc: any): SubscriptionPlan {
@@ -42,27 +45,18 @@ export class SubscriptionService {
   }
 
   async getPublicPlans(): Promise<SubscriptionPlan[]> {
-    const now = Date.now();
-    if (this.publicPlansCache && this.publicPlansCache.expiry > now) {
-      return this.publicPlansCache.data;
-    }
-
     if (mongoose.connection.readyState !== 1) {
-      return PLANS_ARRAY.filter(p => p.isActive && p.isVisible);
+      throw ApiError.internal('Subscription plan database is unavailable');
     }
 
-    await seedPlansIfEmpty();
-    const docs = await PlanModel.find({ isActive: true, isVisible: true })
-      .sort({ displayOrder: 1, priceCents: 1 })
-      .lean();
+    return memoryCache.getOrSet(cacheKeys.publicPlans, 60, async () => {
+      await seedPlansIfEmpty();
+      const docs = await PlanModel.find({ isActive: true, isVisible: true })
+        .sort({ displayOrder: 1, priceCents: 1 })
+        .lean();
 
-    if (docs.length === 0) {
-      return PLANS_ARRAY.filter(p => p.isActive && p.isVisible);
-    }
-
-    const plans = docs.map(d => this.mapDocToPlan(d));
-    this.publicPlansCache = { data: plans, expiry: now + this.CACHE_TTL_MS };
-    return plans;
+      return docs.map((doc) => this.mapDocToPlan(doc));
+    });
   }
 
   async getAllPlans(): Promise<SubscriptionPlan[]> {
@@ -72,7 +66,7 @@ export class SubscriptionService {
     }
 
     if (mongoose.connection.readyState !== 1) {
-      return PLANS_ARRAY;
+      throw ApiError.internal('Subscription plan database is unavailable');
     }
 
     await seedPlansIfEmpty();
@@ -87,16 +81,16 @@ export class SubscriptionService {
 
   async getPlanById(id: string): Promise<SubscriptionPlan | undefined> {
     const normalized = id.startsWith('PLAN_') ? id : `PLAN_${id.toUpperCase()}`;
-    if (mongoose.connection.readyState === 1) {
-      await seedPlansIfEmpty();
-      const doc = await PlanModel.findOne({
-        $or: [{ planId: id }, { planId: normalized }]
-      }).lean();
-      if (doc) {
-        return this.mapDocToPlan(doc);
-      }
+    if (mongoose.connection.readyState !== 1) {
+      throw ApiError.internal('Subscription plan database is unavailable');
     }
-    return SUBSCRIPTION_PLANS[id] || SUBSCRIPTION_PLANS[normalized];
+
+    await seedPlansIfEmpty();
+    const doc = await PlanModel.findOne({
+      $or: [{ planId: id }, { planId: normalized }]
+    }).lean();
+
+    return doc ? this.mapDocToPlan(doc) : undefined;
   }
 
   async createPlan(input: CreatePlanInput, adminId?: string): Promise<SubscriptionPlan> {
@@ -255,13 +249,11 @@ export class SubscriptionService {
       status: 'ACTIVE'
     });
 
-    if (activeSubsCount > 0) {
-      planDoc.isActive = false;
-      planDoc.isVisible = false;
-      await planDoc.save();
-    } else {
-      await PlanModel.deleteOne({ _id: planDoc._id });
-    }
+    // Never hard-delete a plan that may be referenced by historical payments or
+    // subscriptions. Archive it instead so reports remain stable.
+    planDoc.isActive = false;
+    planDoc.isVisible = false;
+    await planDoc.save();
 
     this.clearPlanCache();
 

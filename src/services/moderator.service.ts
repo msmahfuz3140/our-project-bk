@@ -10,6 +10,8 @@ import { hashPassword, generateRandomString } from '../utils/crypto';
 import { normalizePhoneNumber } from '../utils/phone';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
+import { ReferralClickModel } from '../models/ReferralClick';
+import { cacheKeys, memoryCache } from '../utils/cache';
 
 export interface CreateModeratorInput {
   name: string;
@@ -225,69 +227,83 @@ export class ModeratorService {
 
     const activePolicy = await CommissionPolicyModel.getActivePolicy();
     const defaultRate = activePolicy.defaultRate;
+    const moderatorIds = moderators.map((mod) => mod._id);
 
-    const summaries: ModeratorPerformanceSummary[] = await Promise.all(
-      moderators.map(async (mod) => {
-        const modId = mod._id;
+    const [referredCounts, commissionRows] = await Promise.all([
+      UserModel.aggregate([
+        { $match: { referredBy: { $in: moderatorIds }, isDeleted: false } },
+        { $group: { _id: '$referredBy', count: { $sum: 1 } } }
+      ]),
+      ReferralCommissionModel.find({ moderatorId: { $in: moderatorIds } })
+        .select('moderatorId status amountUsd originalPurchaseAmount commissionableAmount commissionRate referredUserId')
+        .lean()
+    ]);
 
-        // Count total referred user accounts
-        const totalReferrals = await UserModel.countDocuments({
-          referredBy: modId,
-          isDeleted: false
-        });
+    const referralCountMap = new Map<string, number>();
+    for (const row of referredCounts) {
+      referralCountMap.set(String(row._id), row.count || 0);
+    }
 
-        // Find all commissions attributed to this moderator
-        const commissions = await ReferralCommissionModel.find({ moderatorId: modId });
+    const commissionsByModerator = new Map<string, any[]>();
+    for (const commission of commissionRows as any[]) {
+      const key = String(commission.moderatorId);
+      if (!commissionsByModerator.has(key)) commissionsByModerator.set(key, []);
+      commissionsByModerator.get(key)!.push(commission);
+    }
 
-        let totalSalesCount = 0;
-        let totalAttributedRevenueUsd = 0;
-        let pendingCommissionUsd = 0;
-        let eligibleCommissionUsd = 0;
-        let approvedCommissionUsd = 0;
-        let reversedCommissionUsd = 0;
-        const buyerSet = new Set<string>();
+    const summaries: ModeratorPerformanceSummary[] = moderators.map((mod) => {
+      const modId = mod._id;
+      const totalReferrals = referralCountMap.get(String(modId)) || 0;
+      const commissions = commissionsByModerator.get(String(modId)) || [];
 
-        for (const c of commissions) {
-          if (c.status === 'REVERSED') {
-            reversedCommissionUsd += c.amountUsd;
-          } else {
-            totalSalesCount++;
-            const rev = c.originalPurchaseAmount ?? c.commissionableAmount ?? (c.commissionRate > 0 ? c.amountUsd / c.commissionRate : c.amountUsd * 2);
-            totalAttributedRevenueUsd += rev;
-            buyerSet.add(c.referredUserId.toString());
+      let totalSalesCount = 0;
+      let totalAttributedRevenueUsd = 0;
+      let pendingCommissionUsd = 0;
+      let eligibleCommissionUsd = 0;
+      let approvedCommissionUsd = 0;
+      let reversedCommissionUsd = 0;
+      const buyerSet = new Set<string>();
 
-            if (c.status === 'PENDING') {
-              pendingCommissionUsd += c.amountUsd;
-            } else if (c.status === 'ELIGIBLE') {
-              eligibleCommissionUsd += c.amountUsd;
-            } else if (c.status === 'APPROVED' || c.status === 'CREDITED') {
-              approvedCommissionUsd += c.amountUsd;
-            }
+      for (const c of commissions) {
+        if (c.status === 'REVERSED') {
+          reversedCommissionUsd += c.amountUsd;
+        } else {
+          totalSalesCount++;
+          const rev = c.originalPurchaseAmount ?? c.commissionableAmount ?? (c.commissionRate > 0 ? c.amountUsd / c.commissionRate : c.amountUsd * 2);
+          totalAttributedRevenueUsd += rev;
+          buyerSet.add(c.referredUserId.toString());
+
+          if (c.status === 'PENDING') {
+            pendingCommissionUsd += c.amountUsd;
+          } else if (c.status === 'ELIGIBLE') {
+            eligibleCommissionUsd += c.amountUsd;
+          } else if (c.status === 'APPROVED' || c.status === 'CREDITED') {
+            approvedCommissionUsd += c.amountUsd;
           }
         }
+      }
 
-        return {
-          moderatorId: modId.toString(),
-          name: mod.name,
-          email: mod.email || '',
-          phone: mod.phone,
-          referralCode: mod.referralCode || '',
-          referralLink: `${origin}/gerister?ref=${mod.referralCode}`,
-          accountStatus: mod.accountStatus,
-          isActive: mod.isActive,
-          commissionRate: mod.moderatorCommissionRate ?? defaultRate,
-          totalReferrals,
-          qualifiedCustomers: buyerSet.size,
-          totalSalesCount,
-          totalAttributedRevenueUsd: Math.round(totalAttributedRevenueUsd * 100) / 100,
-          pendingCommissionUsd: Math.round(pendingCommissionUsd * 100) / 100,
-          eligibleCommissionUsd: Math.round(eligibleCommissionUsd * 100) / 100,
-          approvedCommissionUsd: Math.round(approvedCommissionUsd * 100) / 100,
-          reversedCommissionUsd: Math.round(reversedCommissionUsd * 100) / 100,
-          createdAt: mod.createdAt
-        };
-      })
-    );
+      return {
+        moderatorId: modId.toString(),
+        name: mod.name,
+        email: mod.email || '',
+        phone: mod.phone,
+        referralCode: mod.referralCode || '',
+        referralLink: `${origin}/gerister?ref=${mod.referralCode}`,
+        accountStatus: mod.accountStatus,
+        isActive: mod.isActive,
+        commissionRate: mod.moderatorCommissionRate ?? defaultRate,
+        totalReferrals,
+        qualifiedCustomers: buyerSet.size,
+        totalSalesCount,
+        totalAttributedRevenueUsd: Math.round(totalAttributedRevenueUsd * 100) / 100,
+        pendingCommissionUsd: Math.round(pendingCommissionUsd * 100) / 100,
+        eligibleCommissionUsd: Math.round(eligibleCommissionUsd * 100) / 100,
+        approvedCommissionUsd: Math.round(approvedCommissionUsd * 100) / 100,
+        reversedCommissionUsd: Math.round(reversedCommissionUsd * 100) / 100,
+        createdAt: mod.createdAt
+      };
+    });
 
     return {
       moderators: summaries,
@@ -965,6 +981,7 @@ export class ModeratorService {
    * 13. Moderator Self-Dashboard
    */
   async getModeratorSelfDashboard(moderatorUserId: string, origin?: string): Promise<any> {
+    return memoryCache.getOrSet(cacheKeys.moderatorDashboard(moderatorUserId), 15, async () => {
     const baseUrl = origin || 'http://localhost:3000';
     const moderator = await UserModel.findOne({
       _id: moderatorUserId,
@@ -979,11 +996,14 @@ export class ModeratorService {
     const activePolicy = await CommissionPolicyModel.getActivePolicy();
     const rate = moderator.moderatorCommissionRate ?? activePolicy.defaultRate;
 
-    // Count referred users
-    const totalRegistrations = await UserModel.countDocuments({
-      referredBy: moderator._id,
-      isDeleted: false
-    });
+    // Count referred users and referral link clicks
+    const [totalRegistrations, referralClicks] = await Promise.all([
+      UserModel.countDocuments({
+        referredBy: moderator._id,
+        isDeleted: false
+      }),
+      ReferralClickModel.countDocuments({ moderatorId: moderator._id })
+    ]);
 
     // Fetch commissions for calculations
     const commissions = await ReferralCommissionModel.find({ moderatorId: moderator._id })
@@ -1039,6 +1059,7 @@ export class ModeratorService {
       },
       metrics: {
         referralRegistrations: totalRegistrations,
+        referralClicks,
         qualifiedCustomers: buyerSet.size,
         successfulAttributedSales,
         totalAttributedRevenueUsd: Math.round(totalAttributedRevenueUsd * 100) / 100,
@@ -1051,6 +1072,7 @@ export class ModeratorService {
       nonCustodialNotice:
         'Commission reporting is strictly for accounting and transparency. The platform operates a non-custodial model with zero withdrawal features.'
     };
+    });
   }
 
   /**

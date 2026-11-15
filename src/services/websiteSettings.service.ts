@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
-import { WebsiteSettingsModel, IWebsiteSettings } from '../models/WebsiteSettings';
+import { WebsiteSettingsModel, IWebsiteSettings, DEFAULT_SITE_FAQS } from '../models/WebsiteSettings';
 import { UserModel } from '../models/User';
 import { AuditLogModel } from '../models/AuditLog';
 import { ApiError } from '../utils/apiError';
 import { UserRole } from '../shared/roles';
 import { logger } from '../utils/logger';
+import { cacheKeys, memoryCache } from '../utils/cache';
 
 /**
  * Sanitizes rich-text and legal policy content to prevent arbitrary script and HTML injection.
@@ -20,6 +21,25 @@ export function sanitizeHtmlContent(input: string): string {
     .replace(/\bon\w+\s*=\s*(?:["'][^"']*["']|[^\s>]+)/gi, '') // Strip inline event handlers like onerror, onload
     .replace(/javascript:[^"'\s>]+/gi, '')
     .trim();
+}
+
+function safeSettingUrl(input: string | undefined, allowRelative = true): string {
+  const value = (input || '').trim();
+  if (!value) return '';
+  if (allowRelative && value.startsWith('/') && !value.startsWith('//')) return value;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
+function safeTelegramSetting(input: string | undefined): string {
+  const value = (input || '').trim();
+  if (!value) return '';
+  if (/^@?[A-Za-z0-9_]{4,64}$/.test(value)) return value;
+  return safeSettingUrl(value, false);
 }
 
 export class WebsiteSettingsService {
@@ -80,6 +100,35 @@ export class WebsiteSettingsService {
       }
     }
 
+    if (!settings.homepageContent) {
+      settings.homepageContent = {
+        heroTitle: 'Read the wheel. Time the pattern.',
+        heroSubtitle: 'Roulette Accuracy turns live European wheel telemetry into a clear, direction-aware precision layer.',
+        announcementBanner: ''
+      };
+      changed = true;
+    }
+
+    const legacyHeroTitle = 'Algorithmic Roulette Intelligence & Statistical Wheel Tracking';
+    if (settings.homepageContent?.heroTitle === legacyHeroTitle) {
+      settings.homepageContent.heroTitle = 'Read the wheel. Time the pattern.';
+      changed = true;
+    }
+
+    const legacyFaqQuestions = [
+      'How does the prediction software work?',
+      'Does the software guarantee winning spins?',
+      'Which cryptocurrencies are supported for subscriptions?'
+    ];
+    if (
+      Array.isArray(settings.faqItems) &&
+      settings.faqItems.length === 3 &&
+      legacyFaqQuestions.every((question, index) => settings.faqItems[index]?.question === question)
+    ) {
+      settings.faqItems = DEFAULT_SITE_FAQS.map((item) => ({ ...item }));
+      changed = true;
+    }
+
     if (changed) {
       await settings.save().catch(() => undefined);
     }
@@ -89,20 +138,24 @@ export class WebsiteSettingsService {
    * Public settings for client-side branding, support, and legal policy pages
    */
   async getPublicSettings(): Promise<Partial<IWebsiteSettings>> {
-    const settings = await WebsiteSettingsModel.getSettings();
-    await this.migrateBranding(settings);
-    return {
-      siteName: settings.siteName,
-      logoUrl: settings.logoUrl,
-      faviconUrl: settings.faviconUrl,
-      brandColors: settings.brandColors,
-      supportContact: settings.supportContact,
-      socialLinks: settings.socialLinks,
-      homepageContent: settings.homepageContent,
-      footerContent: settings.footerContent,
-      faqItems: settings.faqItems,
-      legalPolicies: settings.legalPolicies
-    };
+    return memoryCache.getOrSet(cacheKeys.publicSettings, 60, async () => {
+      const settings = await WebsiteSettingsModel.getSettings();
+      await this.migrateBranding(settings);
+      const plain = settings.toObject();
+      return {
+        siteName: plain.siteName,
+        logoUrl: plain.logoUrl,
+        faviconUrl: plain.faviconUrl,
+        brandColors: plain.brandColors,
+        supportContact: plain.supportContact,
+        socialLinks: plain.socialLinks,
+        homepageContent: plain.homepageContent,
+        footerContent: plain.footerContent,
+        faqItems: plain.faqItems,
+        legalPolicies: plain.legalPolicies,
+        updatedAt: plain.updatedAt
+      };
+    });
   }
 
   /**
@@ -140,9 +193,12 @@ export class WebsiteSettingsService {
       homepageContent: settings.homepageContent
     };
 
-    if (updates.siteName !== undefined) settings.siteName = updates.siteName.trim();
-    if (updates.logoUrl !== undefined) settings.logoUrl = updates.logoUrl.trim();
-    if (updates.faviconUrl !== undefined) settings.faviconUrl = updates.faviconUrl.trim();
+    if (updates.siteName !== undefined) {
+      const nextName = updates.siteName.trim().slice(0, 100);
+      if (nextName.length >= 2) settings.siteName = nextName;
+    }
+    if (updates.logoUrl !== undefined) settings.logoUrl = safeSettingUrl(updates.logoUrl);
+    if (updates.faviconUrl !== undefined) settings.faviconUrl = safeSettingUrl(updates.faviconUrl);
 
     if (updates.brandColors) {
       settings.brandColors = {
@@ -154,22 +210,22 @@ export class WebsiteSettingsService {
 
     if (updates.supportContact) {
       settings.supportContact = {
-        email: updates.supportContact.email !== undefined ? updates.supportContact.email.trim() : settings.supportContact.email,
-        telegram: updates.supportContact.telegram !== undefined ? updates.supportContact.telegram.trim() : settings.supportContact.telegram,
-        discord: updates.supportContact.discord !== undefined ? updates.supportContact.discord.trim() : settings.supportContact.discord
+        email: updates.supportContact.email !== undefined ? updates.supportContact.email.trim().slice(0, 200) : settings.supportContact.email,
+        telegram: updates.supportContact.telegram !== undefined ? safeTelegramSetting(updates.supportContact.telegram) : settings.supportContact.telegram,
+        discord: updates.supportContact.discord !== undefined ? safeSettingUrl(updates.supportContact.discord, false) : settings.supportContact.discord
       };
       // Keep socialLinks.telegram in sync if updated
       if (updates.supportContact.telegram !== undefined) {
-        settings.socialLinks.telegram = updates.supportContact.telegram.trim();
+        settings.socialLinks.telegram = safeTelegramSetting(updates.supportContact.telegram);
       }
     }
 
     if (updates.socialLinks) {
       settings.socialLinks = {
-        twitter: updates.socialLinks.twitter !== undefined ? updates.socialLinks.twitter.trim() : settings.socialLinks.twitter,
-        telegram: updates.socialLinks.telegram !== undefined ? updates.socialLinks.telegram.trim() : settings.socialLinks.telegram,
-        youtube: updates.socialLinks.youtube !== undefined ? updates.socialLinks.youtube.trim() : settings.socialLinks.youtube,
-        discord: updates.socialLinks.discord !== undefined ? updates.socialLinks.discord.trim() : settings.socialLinks.discord
+        twitter: updates.socialLinks.twitter !== undefined ? safeSettingUrl(updates.socialLinks.twitter, false) : settings.socialLinks.twitter,
+        telegram: updates.socialLinks.telegram !== undefined ? safeTelegramSetting(updates.socialLinks.telegram) : settings.socialLinks.telegram,
+        youtube: updates.socialLinks.youtube !== undefined ? safeSettingUrl(updates.socialLinks.youtube, false) : settings.socialLinks.youtube,
+        discord: updates.socialLinks.discord !== undefined ? safeSettingUrl(updates.socialLinks.discord, false) : settings.socialLinks.discord
       };
     }
 
@@ -192,6 +248,7 @@ export class WebsiteSettingsService {
       settings.faqItems = updates.faqItems.map((item, idx) => ({
         question: sanitizeHtmlContent(item.question),
         answer: sanitizeHtmlContent(item.answer),
+        category: sanitizeHtmlContent(item.category || 'Platform').slice(0, 60),
         order: item.order !== undefined ? item.order : idx + 1
       }));
     }
@@ -208,6 +265,7 @@ export class WebsiteSettingsService {
     settings.updatedByAdminId = new mongoose.Types.ObjectId(adminId);
     settings.updatedByAdminEmail = adminEmail;
     await settings.save();
+    memoryCache.del(cacheKeys.publicSettings);
 
     await AuditLogModel.create({
       action: 'WEBSITE_SETTINGS_UPDATE',

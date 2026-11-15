@@ -6,6 +6,7 @@ import { ApiError } from '../utils/apiError';
 import { UserRole } from '../shared/roles';
 import { logger } from '../utils/logger';
 import { decryptSecret, encryptSecret, isEncryptedSecret } from '../utils/crypto';
+import { cacheKeys, memoryCache } from '../utils/cache';
 
 export interface AdminToolSettingsView {
   id: string;
@@ -85,16 +86,18 @@ export class ToolSettingsService {
     toolAccessPolicy: ToolAccessPolicy;
     dsApiConfigured: boolean;
   }> {
-    const settings = await ToolSettingsModel.getSettings();
-    const credentials = await this.getDsApiCredentials();
-    return {
-      isToolEnabled: settings.isToolEnabled,
-      maintenanceMode: settings.maintenanceMode,
-      publicStatusMessage: settings.publicStatusMessage,
-      toolVersion: settings.toolVersion,
-      toolAccessPolicy: settings.toolAccessPolicy,
-      dsApiConfigured: !!(credentials.dsApiKey && credentials.dsApiUrl)
-    };
+    return memoryCache.getOrSet(cacheKeys.publicToolStatus, 60, async () => {
+      const settings = await ToolSettingsModel.getSettings();
+      const credentials = await this.getDsApiCredentials();
+      return {
+        isToolEnabled: settings.isToolEnabled,
+        maintenanceMode: settings.maintenanceMode,
+        publicStatusMessage: settings.publicStatusMessage,
+        toolVersion: settings.toolVersion,
+        toolAccessPolicy: settings.toolAccessPolicy,
+        dsApiConfigured: !!(credentials.dsApiKey && credentials.dsApiUrl)
+      };
+    });
   }
 
   /**
@@ -324,6 +327,8 @@ export class ToolSettingsService {
     settings.updatedByAdminId = new mongoose.Types.ObjectId(adminId);
     settings.updatedByAdminEmail = adminEmail;
     await settings.save();
+    memoryCache.del(cacheKeys.publicToolStatus);
+    memoryCache.del(cacheKeys.adminSystemHealth);
 
     await AuditLogModel.create({
       action: 'TOOL_SETTINGS_UPDATE',

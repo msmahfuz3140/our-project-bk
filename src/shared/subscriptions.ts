@@ -24,6 +24,7 @@ export enum PaymentStatus {
 export interface NowPaymentsIpnPayload {
   payment_id: number | string;
   payment_status: string;
+  invoice_id?: number | string;
   pay_address?: string;
   price_amount: number;
   price_currency: string;
@@ -35,10 +36,55 @@ export interface NowPaymentsIpnPayload {
   purchase_id?: string | number;
   outcome_amount?: number;
   outcome_currency?: string;
+  payin_hash?: string;
+  outcome_hash?: string;
+  burn_hash?: string;
+  txid?: string;
   created_at?: string;
   updated_at?: string;
   [key: string]: any;
 }
+
+export type NowPaymentsStatus =
+  | 'waiting'
+  | 'confirming'
+  | 'confirmed'
+  | 'sending'
+  | 'partially_paid'
+  | 'finished'
+  | 'failed'
+  | 'expired'
+  | 'refunded';
+
+export interface PaymentHistoryDTO {
+  orderId: string;
+  paymentId: string;
+  providerPaymentId?: string;
+  planId: string;
+  planName: string;
+  priceAmount: number;
+  priceCurrency: string;
+  priceCents: number;
+  payAmount?: number;
+  actuallyPaid?: number;
+  payCurrency: string;
+  paymentMethod?: string;
+  transactionId?: string;
+  status: PaymentStatus;
+  providerStatus?: string;
+  verified: boolean;
+  isFulfilled: boolean;
+  paidAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  subscription?: {
+    id: string;
+    status: string;
+    startDate?: string;
+    endDate?: string;
+  } | null;
+}
+
 
 export interface AdminPaymentFilterInput {
   search?: string;
@@ -64,6 +110,14 @@ export interface AdminPaymentSummary {
   paymentFeesUsd?: number;
   outstandingCommissionLiabilitiesUsd?: number;
   netRevenueUsd?: number;
+  totalTransactions: number;
+  successfulPayments: number;
+  pendingPayments: number;
+  failedPayments: number;
+  refundedPayments: number;
+  verifiedPayments: number;
+  expiredPayments: number;
+  lastPaymentAt?: string | null;
 }
 
 export const CreatePaymentSchema = z.object({

@@ -1,17 +1,17 @@
 import crypto from 'crypto';
-import { env } from '../config/env';
+import { env, isLivePaymentsEnabled } from '../config/env';
 import { logger } from '../utils/logger';
 import { ApiError } from '../utils/apiError';
 
 export interface CreateNowPaymentsInvoiceInput {
   priceAmount: number;
   priceCurrency: string;
-  payCurrency?: string;
   orderId: string;
   orderDescription: string;
   ipnCallbackUrl: string;
   successUrl: string;
   cancelUrl: string;
+  partiallyPaidUrl?: string;
 }
 
 export interface CreateNowPaymentsPaymentInput {
@@ -24,8 +24,30 @@ export interface CreateNowPaymentsPaymentInput {
   orderDescription: string;
 }
 
+export class NowPaymentsApiError extends Error {
+  public readonly statusCode: number;
+  public readonly providerBody?: string;
+
+  constructor(statusCode: number, message: string, providerBody?: string) {
+    super(message);
+    this.name = 'NowPaymentsApiError';
+    this.statusCode = statusCode;
+    this.providerBody = providerBody;
+  }
+}
+
 export class NowPaymentsService {
-  private baseUrl = env.NOWPAYMENTS_API_URL || 'https://api.nowpayments.io/v1';
+  private get baseUrl(): string {
+    return env.NOWPAYMENTS_API_URL.replace(/\/+$/, '');
+  }
+
+  get mode(): 'sandbox' | 'production' {
+    return env.NOWPAYMENTS_ENV;
+  }
+
+  get isConfigured(): boolean {
+    return env.NOWPAYMENTS_API_KEY.trim().length > 0;
+  }
 
   /**
    * Recursively sorts all keys in an object alphabetically.
@@ -46,116 +68,171 @@ export class NowPaymentsService {
       }, {});
   }
 
-  /**
-   * Verifies the x-nowpayments-sig HMAC-SHA512 signature against the incoming payload.
-   * Uses timing-safe equality to prevent timing attacks.
-   */
-  verifyIpnSignature(payload: any, signature: string | undefined, customSecret?: string): boolean {
-    const secret = customSecret || env.NOWPAYMENTS_IPN_SECRET;
-    if (!signature || !secret || secret.trim() === '') {
-      return false;
-    }
-
-    try {
-      const sortedPayload = this.sortObjectKeys(payload);
-      const jsonString = JSON.stringify(sortedPayload);
-
-      const calculatedSig = crypto
-        .createHmac('sha512', secret.trim())
-        .update(jsonString)
-        .digest('hex');
-
-      const sigBuffer = Buffer.from(signature.trim(), 'utf8');
-      const calcBuffer = Buffer.from(calculatedSig.trim(), 'utf8');
-
-      if (sigBuffer.length !== calcBuffer.length) {
-        return false;
-      }
-
-      return crypto.timingSafeEqual(sigBuffer, calcBuffer);
-    } catch (err) {
-      logger.error('Error during IPN signature verification', err);
-      return false;
-    }
+  canonicalizePayload(payload: Record<string, unknown>): string {
+    return JSON.stringify(this.sortObjectKeys(payload));
   }
 
   /**
-   * Helper to generate a valid signature for automated testing / simulation.
+   * Deterministic event identifier used for webhook idempotency.
+   * Exact replays produce the same id and are rejected by a unique index.
    */
-  generateIpnSignature(payload: any, secret: string): string {
-    const sortedPayload = this.sortObjectKeys(payload);
-    const jsonString = JSON.stringify(sortedPayload);
+  buildEventId(payload: Record<string, unknown>): string {
     return crypto
-      .createHmac('sha512', secret.trim())
-      .update(jsonString)
+      .createHash('sha256')
+      .update(this.canonicalizePayload(payload))
       .digest('hex');
   }
 
   /**
-   * Check NOWPayments API operational status (GET /v1/status)
+   * Verifies the x-nowpayments-sig header using HMAC-SHA512 over the
+   * recursively sorted JSON payload. Comparison is timing-safe.
+   */
+  verifyIpnSignature(payload: any, signature: string | undefined, customSecret?: string): boolean {
+    const secret = (customSecret ?? env.NOWPAYMENTS_IPN_SECRET).trim();
+    if (!signature || !secret || !payload || typeof payload !== 'object') {
+      return false;
+    }
+
+    try {
+      const candidate = signature.trim().toLowerCase();
+      if (!/^[a-f0-9]{128}$/.test(candidate)) {
+        return false;
+      }
+
+      const calculatedSig = crypto
+        .createHmac('sha512', secret)
+        .update(this.canonicalizePayload(payload))
+        .digest('hex');
+
+      const candidateBuffer = Buffer.from(candidate, 'hex');
+      const calculatedBuffer = Buffer.from(calculatedSig, 'hex');
+
+      if (candidateBuffer.length !== calculatedBuffer.length) {
+        return false;
+      }
+
+      return crypto.timingSafeEqual(candidateBuffer, calculatedBuffer);
+    } catch (err) {
+      logger.error('Error during NOWPayments IPN signature verification', err);
+      return false;
+    }
+  }
+
+  /**
+   * Helper used by automated tests / internal diagnostics only.
+   * Never expose this through an unauthenticated endpoint.
+   */
+  generateIpnSignature(payload: any, secret: string): string {
+    return crypto
+      .createHmac('sha512', secret.trim())
+      .update(this.canonicalizePayload(payload))
+      .digest('hex');
+  }
+
+  private async request<T>(
+    path: string,
+    options: { method?: string; body?: Record<string, unknown> } = {}
+  ): Promise<T> {
+    if (!this.isConfigured) {
+      throw new NowPaymentsApiError(503, 'NOWPayments API key is not configured');
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), env.NOWPAYMENTS_API_TIMEOUT_MS);
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        method: options.method || 'GET',
+        headers: {
+          'x-api-key': env.NOWPAYMENTS_API_KEY,
+          ...(options.body ? { 'Content-Type': 'application/json' } : {})
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal
+      });
+    } catch (error: any) {
+      const timedOut = error?.name === 'AbortError';
+      logger.error('NOWPayments API request failed', {
+        path,
+        timedOut,
+        message: error?.message
+      });
+      throw new NowPaymentsApiError(
+        502,
+        timedOut
+          ? 'NOWPayments API request timed out'
+          : 'NOWPayments API is temporarily unreachable'
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const rawText = await response.text().catch(() => '');
+    let data: any = null;
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      // Do not log full provider responses: they are not needed for debugging
+      // and could contain merchant-specific account metadata.
+      logger.error('NOWPayments API returned an error', {
+        path,
+        status: response.status,
+        providerCode: data?.code || data?.statusCode || undefined
+      });
+      throw new NowPaymentsApiError(
+        response.status,
+        `NOWPayments API returned HTTP ${response.status}`,
+        rawText.slice(0, 1000)
+      );
+    }
+
+    return data as T;
+  }
+
+  /**
+   * Check NOWPayments API operational status (GET /v1/status).
    */
   async getStatus(): Promise<{ message: string }> {
-    if (!env.NOWPAYMENTS_API_KEY) {
-      return { message: 'SIMULATION_MODE_OK' };
-    }
-
-    try {
-      const response = await fetch(`${this.baseUrl}/status`, {
-        headers: {
-          'x-api-key': env.NOWPAYMENTS_API_KEY
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`NOWPayments status returned ${response.status}`);
-      }
-
-      return (await response.json()) as { message: string };
-    } catch (error) {
-      logger.error('Failed to get NOWPayments status', error);
-      throw ApiError.internal('Payment provider service is temporarily unreachable');
-    }
+    return this.request<{ message: string }>('/status');
   }
 
   /**
-   * Get supported currencies list (GET /v1/currencies)
+   * Get supported currencies list (GET /v1/currencies).
    */
   async getCurrencies(): Promise<string[]> {
-    if (!env.NOWPAYMENTS_API_KEY) {
-      return ['usdttrc20', 'usdterc20', 'usdtbep20', 'btc', 'eth', 'trx', 'ltc', 'sol', 'doge', 'usdc'];
+    if (!this.isConfigured) {
+      return [];
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/currencies`, {
-        headers: {
-          'x-api-key': env.NOWPAYMENTS_API_KEY
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`NOWPayments currencies returned ${response.status}`);
-      }
-
-      const data = (await response.json()) as any;
+      const data = await this.request<{ currencies: string[] }>('/currencies');
       return data.currencies || [];
     } catch (error: any) {
-      logger.warn('Failed to fetch currencies from NOWPayments, returning standard fallback list', { error: error?.message });
-      return ['usdttrc20', 'usdterc20', 'usdtbep20', 'btc', 'eth', 'trx', 'ltc', 'sol', 'doge', 'usdc'];
+      logger.warn('Failed to fetch currencies from NOWPayments', { message: error?.message });
+      return [];
     }
   }
 
   /**
-   * Create an invoice with hosted checkout link (POST /v1/invoice)
+   * Create a hosted invoice (POST /v1/invoice).
+   * The invoice is always denominated in the server-side plan currency.
    */
   async createInvoice(input: CreateNowPaymentsInvoiceInput): Promise<any> {
-    if (!env.NOWPAYMENTS_API_KEY || env.NOWPAYMENTS_API_KEY.trim() === '') {
-      return null;
+    if (!isLivePaymentsEnabled()) {
+      throw new NowPaymentsApiError(
+        503,
+        'Live payments are disabled until provider eligibility and legal authorization are confirmed'
+      );
     }
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       price_amount: input.priceAmount,
       price_currency: input.priceCurrency.toLowerCase(),
-      pay_currency: input.payCurrency ? input.payCurrency.toLowerCase() : undefined,
       order_id: input.orderId,
       order_description: input.orderDescription,
       ipn_callback_url: input.ipnCallbackUrl,
@@ -163,80 +240,81 @@ export class NowPaymentsService {
       cancel_url: input.cancelUrl
     };
 
-    const response = await fetch(`${this.baseUrl}/invoice`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': env.NOWPAYMENTS_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      logger.error('NOWPayments createInvoice API error', { status: response.status, errText });
-      throw new Error(`NOWPayments error ${response.status}: ${errText}`);
+    if (input.partiallyPaidUrl) {
+      payload.partially_paid_url = input.partiallyPaidUrl;
     }
 
-    return await response.json();
+    return this.request<any>('/invoice', {
+      method: 'POST',
+      body: payload
+    });
   }
 
   /**
-   * Create direct payment with wallet address (POST /v1/payment)
+   * Create a direct crypto payment with a fixed pay currency (POST /v1/payment).
+   * Retained for future provider adapters; the hosted invoice flow is preferred.
    */
   async createPayment(input: CreateNowPaymentsPaymentInput): Promise<any> {
-    if (!env.NOWPAYMENTS_API_KEY || env.NOWPAYMENTS_API_KEY.trim() === '') {
-      return null;
+    if (!isLivePaymentsEnabled()) {
+      throw new NowPaymentsApiError(
+        503,
+        'Live payments are disabled until provider eligibility and legal authorization are confirmed'
+      );
     }
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       price_amount: input.priceAmount,
       price_currency: input.priceCurrency.toLowerCase(),
-      pay_amount: input.payAmount,
       pay_currency: input.payCurrency.toLowerCase(),
       ipn_callback_url: input.ipnCallbackUrl,
       order_id: input.orderId,
       order_description: input.orderDescription
     };
 
-    const response = await fetch(`${this.baseUrl}/payment`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': env.NOWPAYMENTS_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      logger.error('NOWPayments createPayment API error', { status: response.status, errText });
-      throw new Error(`NOWPayments error ${response.status}: ${errText}`);
+    if (input.payAmount !== undefined) {
+      payload.pay_amount = input.payAmount;
     }
 
-    return await response.json();
+    return this.request<any>('/payment', {
+      method: 'POST',
+      body: payload
+    });
   }
 
   /**
-   * Get payment details and live status (GET /v1/payment/{id})
+   * Independently retrieve payment details from NOWPayments
+   * (GET /v1/payment/{payment_id}). Used before granting Premium access.
    */
   async getPayment(paymentId: string): Promise<any> {
-    if (!env.NOWPAYMENTS_API_KEY || env.NOWPAYMENTS_API_KEY.trim() === '') {
-      return null;
+    if (!paymentId || !String(paymentId).trim()) {
+      throw new NowPaymentsApiError(400, 'A NOWPayments payment id is required');
+    }
+    return this.request<any>(`/payment/${encodeURIComponent(String(paymentId).trim())}`);
+  }
+
+  /**
+   * Safe, secret-free configuration summary for health checks.
+   */
+  getConfigurationStatus() {
+    let apiHost = 'invalid';
+    try {
+      apiHost = new URL(this.baseUrl).host;
+    } catch {
+      apiHost = 'invalid';
     }
 
-    const response = await fetch(`${this.baseUrl}/payment/${paymentId}`, {
-      headers: {
-        'x-api-key': env.NOWPAYMENTS_API_KEY
-      }
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`NOWPayments getPayment error ${response.status}: ${errText}`);
-    }
-
-    return await response.json();
+    return {
+      provider: 'NOWPAYMENTS',
+      mode: this.mode,
+      apiHost,
+      apiKeyConfigured: this.isConfigured,
+      ipnSecretConfigured: env.NOWPAYMENTS_IPN_SECRET.trim().length > 0,
+      liveEnabled: isLivePaymentsEnabled(),
+      requireApiVerification: Boolean(env.NOWPAYMENTS_REQUIRE_API_VERIFICATION),
+      webhookUrl: env.PAYMENT_IPN_CALLBACK_URL,
+      successUrl: env.PAYMENT_SUCCESS_URL,
+      cancelUrl: env.PAYMENT_CANCEL_URL
+    };
   }
 }
 

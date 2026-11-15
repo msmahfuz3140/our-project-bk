@@ -2,6 +2,8 @@ import mongoose, { Schema, Document } from 'mongoose';
 import { PaymentStatus } from '../shared/subscriptions';
 import { PlanDuration } from '../shared/plans';
 
+export type FulfillmentStatus = 'NONE' | 'PROCESSING' | 'FULFILLED' | 'FAILED';
+
 export interface IipnEvent {
   receivedAt: Date;
   paymentStatus: string;
@@ -9,6 +11,14 @@ export interface IipnEvent {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * Existing platform model for a purchase order + its provider payment.
+ *
+ * The project already used a single collection for both the order snapshot
+ * (orderId / plan / price) and the provider payment record. We deliberately
+ * extend it rather than creating a duplicate `orders` collection. This keeps
+ * all existing admin, ledger, referral and subscription relationships intact.
+ */
 export interface IPayment extends Document {
   userId: mongoose.Types.ObjectId;
   planId: string;
@@ -21,14 +31,39 @@ export interface IPayment extends Document {
   payAmount?: number;
   actuallyPaid?: number;
   payCurrency: string;
-  paymentId: string;
-  orderId: string;
+  paymentId: string;       // Provider reference shown to the user (invoice/payment id)
+  orderId: string;         // Human-readable order number
+
+  // NOWPayments provider linkage
+  provider: string;
+  providerInvoiceId?: string;
+  providerPaymentId?: string;
+  providerStatus?: string;
+  paymentMethod?: string;
+  transactionId?: string;
+  payCurrencyLocked: boolean;
+
   status: PaymentStatus;
   isFulfilled: boolean;
+  fulfillmentStatus: FulfillmentStatus;
+  processingStartedAt?: Date;
   subscriptionId?: mongoose.Types.ObjectId;
   failureReason?: string;
   payAddress?: string;
   checkoutUrl?: string;
+
+  // Verification / lifecycle evidence
+  signatureVerified: boolean;
+  providerVerified: boolean;
+  verified: boolean;
+  verifiedAt?: Date;
+  paidAt?: Date;
+  expiresAt?: Date;
+  refundedAt?: Date;
+  overpaymentAmount?: number;
+  webhookEventCount: number;
+  lastWebhookAt?: Date;
+
   referredByModeratorId?: mongoose.Types.ObjectId;
   referralCodeSnapshot?: string;
   commissionRateSnapshot?: number;
@@ -94,14 +129,42 @@ const PaymentSchema = new Schema<IPayment>({
   paymentId: {
     type: String,
     required: true,
-    unique: true,
-    index: true
+    unique: true
   },
   orderId: {
     type: String,
     required: true,
-    unique: true,
+    unique: true
+  },
+  provider: {
+    type: String,
+    default: 'NOWPAYMENTS',
     index: true
+  },
+  providerInvoiceId: {
+    type: String,
+    index: true,
+    sparse: true
+  },
+  providerPaymentId: {
+    type: String,
+    sparse: true
+  },
+  providerStatus: {
+    type: String,
+    index: true
+  },
+  paymentMethod: {
+    type: String
+  },
+  transactionId: {
+    type: String,
+    index: true,
+    sparse: true
+  },
+  payCurrencyLocked: {
+    type: Boolean,
+    default: false
   },
   status: {
     type: String,
@@ -113,6 +176,15 @@ const PaymentSchema = new Schema<IPayment>({
     type: Boolean,
     default: false,
     index: true
+  },
+  fulfillmentStatus: {
+    type: String,
+    enum: ['NONE', 'PROCESSING', 'FULFILLED', 'FAILED'],
+    default: 'NONE',
+    index: true
+  },
+  processingStartedAt: {
+    type: Date
   },
   subscriptionId: {
     type: Schema.Types.ObjectId,
@@ -127,6 +199,43 @@ const PaymentSchema = new Schema<IPayment>({
   },
   checkoutUrl: {
     type: String
+  },
+  signatureVerified: {
+    type: Boolean,
+    default: false
+  },
+  providerVerified: {
+    type: Boolean,
+    default: false
+  },
+  verified: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  verifiedAt: {
+    type: Date
+  },
+  paidAt: {
+    type: Date,
+    index: true
+  },
+  expiresAt: {
+    type: Date,
+    index: true
+  },
+  refundedAt: {
+    type: Date
+  },
+  overpaymentAmount: {
+    type: Number
+  },
+  webhookEventCount: {
+    type: Number,
+    default: 0
+  },
+  lastWebhookAt: {
+    type: Date
   },
   referredByModeratorId: {
     type: Schema.Types.ObjectId,
@@ -168,5 +277,10 @@ PaymentSchema.index({ status: 1, isFulfilled: 1 });
 PaymentSchema.index({ isFulfilled: 1, createdAt: -1 });
 PaymentSchema.index({ referredByModeratorId: 1, status: 1 });
 PaymentSchema.index({ createdAt: -1 });
+PaymentSchema.index({ userId: 1, orderId: 1 });
+PaymentSchema.index(
+  { provider: 1, providerPaymentId: 1 },
+  { unique: true, partialFilterExpression: { providerPaymentId: { $type: 'string' } } }
+);
 
 export const PaymentModel = mongoose.models.Payment || mongoose.model<IPayment>('Payment', PaymentSchema);

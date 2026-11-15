@@ -8,13 +8,13 @@ import { AuditLogModel, IAuditLog, AuditActionType } from '../models/AuditLog';
 import { DualApprovalModel, IDualApproval, DualApprovalActionType } from '../models/DualApproval';
 import { UserRole } from '../shared/roles';
 import { PaymentStatus, SubscriptionStatus } from '../shared/subscriptions';
-import { PLANS_ARRAY } from '../shared/plans';
 import { PlanModel } from '../models/Plan';
 import { hashPassword, generateRandomString } from '../utils/crypto';
 import { normalizePhoneNumber } from '../utils/phone';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import { memoryCache } from '../utils/cache';
+import { cacheKeys } from '../utils/cache';
 import { financialService } from './financial.service';
 
 export interface AdminDashboardMetrics {
@@ -178,10 +178,13 @@ export class AdminService {
     const estimatedPaymentFeesUsd = Math.round(grossSalesUsd * 0.01 * 100) / 100;
     const netRevenueUsd = Math.round((grossSalesUsd - refundsUsd - estimatedPaymentFeesUsd - outstandingCommissionLiabilitiesUsd) * 100) / 100;
 
-    // Plan distribution dictionary
+    // Plan distribution dictionary from the live plan catalogue
     const planDistribution: Record<string, number> = {};
-    for (const p of PLANS_ARRAY) {
-      planDistribution[p.id] = 0;
+    const allPlans = await memoryCache.getOrSet(cacheKeys.adminAllPlans, 60, () =>
+      PlanModel.find().select('planId').lean()
+    );
+    for (const p of allPlans) {
+      planDistribution[p.planId] = 0;
     }
     for (const row of subscriptionsByPlan) {
       if (row._id) {
@@ -308,12 +311,14 @@ export class AdminService {
         .limit(limit)
         .lean(),
       UserModel.countDocuments(query),
-      Promise.all([
-        UserModel.countDocuments({ isDeleted: { $ne: true } }),
-        UserModel.countDocuments({ role: UserRole.SUPER_ADMIN, isDeleted: { $ne: true } }),
-        UserModel.countDocuments({ role: UserRole.MODERATOR, isDeleted: { $ne: true } }),
-        SubscriptionModel.countDocuments({ status: SubscriptionStatus.ACTIVE, isRevoked: { $ne: true }, endDate: { $gt: new Date() } })
-      ])
+      memoryCache.getOrSet(cacheKeys.adminUserSummary, 15, () =>
+        Promise.all([
+          UserModel.countDocuments({ isDeleted: { $ne: true } }),
+          UserModel.countDocuments({ role: UserRole.SUPER_ADMIN, isDeleted: { $ne: true } }),
+          UserModel.countDocuments({ role: UserRole.MODERATOR, isDeleted: { $ne: true } }),
+          SubscriptionModel.countDocuments({ status: SubscriptionStatus.ACTIVE, isRevoked: { $ne: true }, endDate: { $gt: new Date() } })
+        ])
+      )
     ]);
 
     const summary = {
@@ -339,7 +344,7 @@ export class AdminService {
         { $match: { userId: { $in: userIds }, isFulfilled: true } },
         { $group: { _id: '$userId', totalSpent: { $sum: '$priceAmount' }, orderCount: { $sum: 1 } } }
       ]),
-      memoryCache.getOrSet('admin:allPlans', 60, () => PlanModel.find().lean())
+      memoryCache.getOrSet(cacheKeys.adminAllPlans, 60, () => PlanModel.find().lean())
     ]);
 
     const planMap = new Map<string, any>();
@@ -430,15 +435,15 @@ export class AdminService {
     }
 
     const [subscriptions, payments, commissions, auditLogs, allPlans] = await Promise.all([
-      SubscriptionModel.find({ userId: user._id }).sort({ createdAt: -1 }).lean(),
-      PaymentModel.find({ userId: user._id }).sort({ createdAt: -1 }).lean(),
+      SubscriptionModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
+      PaymentModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
       ReferralCommissionModel.find({
         $or: [{ moderatorId: user._id }, { referredUserId: user._id }]
-      }).sort({ createdAt: -1 }).lean(),
+      }).sort({ createdAt: -1 }).limit(100).lean(),
       AuditLogModel.find({
         $or: [{ targetUserId: user._id }, { adminId: user._id }]
       }).sort({ createdAt: -1 }).limit(25).lean(),
-      PlanModel.find().lean()
+      memoryCache.getOrSet(cacheKeys.adminAllPlans, 60, () => PlanModel.find().lean())
     ]);
 
     const planMap = new Map<string, any>();
@@ -509,10 +514,10 @@ export class AdminService {
 
     if (input.name) user.name = input.name.trim();
     if (input.phone !== undefined) user.phone = input.phone.trim() || undefined;
-    if (input.password && input.password.trim().length >= 6) {
+    if (input.password && input.password.trim().length >= 8) {
       const cleanPass = input.password.trim();
       user.passwordHash = await hashPassword(cleanPass);
-      user.plainPassword = cleanPass;
+      user.sessionsRevokedAt = new Date();
     }
     if (input.isEmailVerified !== undefined) user.isEmailVerified = input.isEmailVerified;
     if (input.isPhoneVerified !== undefined) user.isPhoneVerified = input.isPhoneVerified;
@@ -534,6 +539,8 @@ export class AdminService {
     }
 
     await user.save();
+    memoryCache.del(cacheKeys.userDashboard(user._id.toString()));
+    memoryCache.del(cacheKeys.authContext(user._id.toString()));
 
     await this.logAction({
       action: 'USER_PROFILE_EDIT',
@@ -586,6 +593,7 @@ export class AdminService {
       user.statusReason = reason.trim();
       user.statusChangedAt = now;
       user.statusChangedByAdminId = new mongoose.Types.ObjectId(adminId);
+      user.sessionsRevokedAt = now;
     } else if (action === 'UNBLOCK') {
       user.accountStatus = AccountStatus.ACTIVE;
       user.statusReason = reason.trim();
@@ -598,9 +606,12 @@ export class AdminService {
       user.statusChangedAt = now;
       user.statusChangedByAdminId = new mongoose.Types.ObjectId(adminId);
       user.suspendedUntil = suspendedUntil || new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // Default 7 days
+      user.sessionsRevokedAt = now;
     }
 
     await user.save();
+    memoryCache.del(cacheKeys.userDashboard(user._id.toString()));
+    memoryCache.del(cacheKeys.authContext(user._id.toString()));
 
     const auditAction: AuditActionType =
       action === 'BLOCK' ? 'USER_BLOCK' : action === 'UNBLOCK' ? 'USER_UNBLOCK' : 'USER_SUSPEND';
@@ -623,7 +634,8 @@ export class AdminService {
   }
 
   /**
-   * Delete user account permanently from MongoDB while preserving audit logs
+   * Soft-delete a user account while preserving payments, subscriptions,
+   * commissions and audit history. Financial records are never hard-deleted.
    */
   async softDeleteUser(adminId: string, adminEmail: string, userId: string, reason: string): Promise<any> {
     const user = await UserModel.findById(userId);
@@ -638,14 +650,38 @@ export class AdminService {
     const targetUserId = user._id.toString();
     const targetEmail = user.email || 'unknown';
     const targetRole = user.role;
+    const now = new Date();
 
-    // Revoke & remove any active subscriptions
-    await SubscriptionModel.deleteMany({ userId: user._id });
+    // Preserve subscription history; only revoke currently active access.
+    await SubscriptionModel.updateMany(
+      {
+        userId: user._id,
+        status: SubscriptionStatus.ACTIVE,
+        isRevoked: { $ne: true }
+      },
+      {
+        $set: {
+          status: SubscriptionStatus.REVOKED,
+          isRevoked: true,
+          revokedAt: now,
+          revocationReason: `Account soft-deleted: ${reason}`
+        }
+      }
+    );
 
-    // Permanent hard delete from MongoDB collection
-    await UserModel.findByIdAndDelete(user._id);
+    user.isDeleted = true;
+    user.deletedAt = now;
+    user.deletionReason = reason.trim();
+    user.accountStatus = AccountStatus.DELETED;
+    user.isActive = false;
+    user.sessionsRevokedAt = now;
+    await user.save();
 
-    // Record immutable audit trail
+    memoryCache.del(cacheKeys.authContext(targetUserId));
+    memoryCache.del(cacheKeys.userDashboard(targetUserId));
+
+    // Record immutable audit trail. The user document and all financial
+    // relationships remain in MongoDB for historical/accounting consistency.
     await this.logAction({
       action: 'USER_SOFT_DELETE',
       adminId,
@@ -655,17 +691,20 @@ export class AdminService {
       reason,
       details: {
         deletedRole: targetRole,
-        deletedAt: new Date()
+        deletedAt: now,
+        deletionMode: 'SOFT_DELETE',
+        financialRecordsPreserved: true
       }
     });
 
-    logger.info(`User ${targetEmail} (${targetRole}) was permanently deleted from MongoDB by Admin ${adminEmail}.`);
+    logger.info(`User ${targetEmail} (${targetRole}) was soft-deleted by Admin ${adminEmail}.`);
     return {
       _id: targetUserId,
       id: targetUserId,
       email: targetEmail,
       role: targetRole,
-      isDeleted: true
+      isDeleted: true,
+      deletionMode: 'SOFT_DELETE'
     };
   }
 

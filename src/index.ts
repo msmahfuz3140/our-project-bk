@@ -1,6 +1,8 @@
 import { app } from './app';
 import { env } from './config/env';
 import { db } from './database/connection';
+import { ensurePaymentIndexes } from './database/ensureIndexes';
+import { ensureSecurityBaseline } from './database/ensureIndexes';
 import { initializeAuthoritativeAdmin } from './database/initAdmin';
 import { logger } from './utils/logger';
 
@@ -12,6 +14,15 @@ async function bootstrap() {
 
   // Connect to Database
   await db.connect();
+
+  // Critical payment idempotency indexes (safe + idempotent)
+  await ensurePaymentIndexes().catch((err) => {
+    logger.error('Warning: could not ensure payment indexes', err);
+  });
+
+  await ensureSecurityBaseline().catch((err) => {
+    logger.error('Warning: could not run security baseline migration', err);
+  });
 
   // Ensure authoritative SUPER_ADMIN exists in MongoDB and old demo accounts are removed
   await initializeAuthoritativeAdmin().catch((err) => {

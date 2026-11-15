@@ -1,4 +1,5 @@
 import { env } from '../config/env';
+import { isProductionRuntime } from '../config/env';
 import { logger } from '../utils/logger';
 import { ApiError } from '../utils/apiError';
 import { isValidE164 } from '../utils/phone';
@@ -41,19 +42,21 @@ export class SmsService {
         return true;
       } catch (error) {
         logger.error(`SMS dispatch error to: ${to}`, error);
-        if (env.NODE_ENV === 'production') {
+        if (isProductionRuntime) {
           throw ApiError.internal('SMS provider error. Verification code could not be sent.');
         }
       }
     }
 
-    // In development or test mode (or when Twilio credentials are pending): Safe simulation
-    logger.info(`📱 [SMS NOTIFICATION] (Target: ${to})`);
-    logger.info(`Message: ${message}`);
-    if (!twilioSid && env.NODE_ENV === 'production') {
-      logger.warn('Twilio credentials not configured in production. Add TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env to dispatch live SMS.');
+    // Development/test-only simulation. Never log OTP content in production.
+    if (!isProductionRuntime) {
+      logger.info(`[SMS NOTIFICATION] (Target: ${to})`);
+      logger.info(`Message: ${message}`);
+      return true;
     }
-    return true;
+
+    logger.warn('SMS delivery is not configured in production. No message content was logged.');
+    return false;
   }
 
   async sendVerificationOtp(to: string, code: string): Promise<boolean> {

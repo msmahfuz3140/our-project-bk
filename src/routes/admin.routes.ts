@@ -3,6 +3,7 @@ import { adminController } from '../controllers/admin.controller';
 import { moderatorController } from '../controllers/moderator.controller';
 import { adminSettingsController } from '../controllers/adminSettings.controller';
 import { financialController } from '../controllers/financial.controller';
+import { systemController } from '../controllers/system.controller';
 import { requireAuth, requireRole } from '../middleware/auth.middleware';
 import { UserRole } from '../shared/roles';
 
@@ -15,6 +16,11 @@ router.use(requireRole(UserRole.SUPER_ADMIN));
 // Dashboard Metrics
 router.get('/dashboard-metrics', (req, res, next) =>
   adminController.getDashboardMetrics(req, res, next)
+);
+
+// System health, index status, cache and measured API latency
+router.get('/system/health', (req, res, next) =>
+  systemController.getSystemHealth(req as any, res, next)
 );
 
 // User Management

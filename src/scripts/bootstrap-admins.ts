@@ -5,7 +5,6 @@ import { UserRole } from '../shared/roles';
 import { hashPassword, generateRandomString } from '../utils/crypto';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
-import crypto from 'crypto';
 
 export async function bootstrapMainAdmins(shouldDisconnect = require.main === module): Promise<void> {
   logger.info('Checking Main Admin bootstrap status...');
@@ -25,7 +24,12 @@ export async function bootstrapMainAdmins(shouldDisconnect = require.main === mo
   const designatedEmails = env.MAIN_ADMINS.slice(0, 4);
   logger.info(`Initializing ${designatedEmails.length} designated Main Admin accounts...`);
 
-  const generatedCredentials: Array<{ name: string; email: string; password: string }> = [];
+  const initialPassword = (process.env.INITIAL_ADMIN_PASSWORD || '').trim();
+  if (initialPassword.length < 12 || /^change_this/i.test(initialPassword)) {
+    throw new Error(
+      'INITIAL_ADMIN_PASSWORD must be set to a strong non-placeholder value (12+ characters) before bootstrap. Passwords are never generated or printed to logs.'
+    );
+  }
 
   for (let i = 0; i < designatedEmails.length; i++) {
     const email = designatedEmails[i].toLowerCase().trim();
@@ -53,9 +57,8 @@ export async function bootstrapMainAdmins(shouldDisconnect = require.main === mo
       continue;
     }
 
-    // High-entropy, unique password per Main Admin (no shared credentials)
-    const uniqueEntropy = crypto.randomBytes(6).toString('hex');
-    const initialPassword = process.env.ADMIN_DEFAULT_PASSWORD || `Admin_Pass_${uniqueEntropy}!`;
+    // High-entropy passwords are supplied by the operator via environment.
+    // Never generate or print credentials to logs.
     const passwordHash = await hashPassword(initialPassword);
 
     const newAdmin = await UserModel.create({
@@ -78,28 +81,7 @@ export async function bootstrapMainAdmins(shouldDisconnect = require.main === mo
       details: { designatedEmailIndex: i + 1, seatNumber: i + 1 }
     }).catch((err) => logger.error('Audit log failed during bootstrap account creation', err));
 
-    generatedCredentials.push({
-      name: `Main Admin ${i + 1}`,
-      email,
-      password: initialPassword
-    });
-
     logger.info(`Main Admin ${i + 1} initialized: ${email}`);
-    if (env.NODE_ENV === 'development' || env.NODE_ENV === 'test') {
-      logger.info(`[DEV ONLY] Initial credentials for ${email}: ${initialPassword}`);
-    }
-  }
-
-  if (generatedCredentials.length > 0 && env.NODE_ENV !== 'test') {
-    console.log('\n================================================================');
-    console.log('       SECURE INITIAL MAIN ADMIN CREDENTIALS GENERATED          ');
-    console.log('================================================================');
-    console.log('IMPORTANT: Record these individual credentials immediately.');
-    console.log('Each Main Admin MUST change their password upon first login.\n');
-    generatedCredentials.forEach((c) => {
-      console.log(`[${c.name}] Email: ${c.email} | Temporary Password: ${c.password}`);
-    });
-    console.log('================================================================\n');
   }
 
   logger.info('First-time owner bootstrap procedure completed successfully. Bootstrap is now disabled.');
