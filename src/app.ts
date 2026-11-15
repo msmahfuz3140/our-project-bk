@@ -111,33 +111,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Lazy Database connection middleware for Serverless runtime
-let isDbInitialized = false;
-app.use(async (_req, _res, next) => {
-  try {
-    if (!isDbInitialized) {
-      const { db } = require('./database/connection');
-      const { initializeAuthoritativeAdmin } = require('./database/initAdmin');
-      const { ensurePaymentIndexes } = require('./database/ensureIndexes');
-      const { ensureSecurityBaseline } = require('./database/ensureIndexes');
-      await db.connect();
-      await ensurePaymentIndexes().catch((err: any) => {
-        logger.error('Failed to ensure payment indexes during startup:', err);
-      });
-      await ensureSecurityBaseline().catch((err: any) => {
-        logger.error('Failed to run security baseline migration:', err);
-      });
-      await initializeAuthoritativeAdmin().catch((err: any) => {
-        logger.error('Failed to initialize admin during startup:', err);
-      });
-      isDbInitialized = true;
-    }
-    next();
-  } catch (err) {
-    next(err);
-  }
-});
-
 // Root welcome & status endpoint
 app.get(['/', '/api', '/api/index'], (_req: Request, res: Response) => {
   res.status(200).json({
@@ -152,6 +125,35 @@ app.get(['/', '/api', '/api/index'], (_req: Request, res: Response) => {
 
 // Root health check endpoint
 app.get('/health', getHealth);
+
+// Lazy Database connection middleware for Serverless runtime
+let isDbInitialized = false;
+app.use(async (_req, _res, next) => {
+  try {
+    if (!isDbInitialized) {
+      const { db } = require('./database/connection');
+      const { initializeAuthoritativeAdmin } = require('./database/initAdmin');
+      const { ensurePaymentIndexes } = require('./database/ensureIndexes');
+      const { ensureSecurityBaseline } = require('./database/ensureIndexes');
+      const connected = await db.connect();
+      if (connected) {
+        await ensurePaymentIndexes().catch((err: any) => {
+          logger.error('Failed to ensure payment indexes during startup:', err);
+        });
+        await ensureSecurityBaseline().catch((err: any) => {
+          logger.error('Failed to run security baseline migration:', err);
+        });
+        await initializeAuthoritativeAdmin().catch((err: any) => {
+          logger.error('Failed to initialize admin during startup:', err);
+        });
+        isDbInitialized = true;
+      }
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 // Better Auth endpoints
 let betterAuthHandler: any = null;
