@@ -169,6 +169,10 @@ async function run() {
   const adminToken = tokenFor(superAdmin._id.toString());
 
   console.log('\n[3. Public cache + ETag revalidation]');
+  const health = await get('/api/v1/health');
+  const healthJson = JSON.parse(health.body);
+  assert(health.status === 200, 'health reports UP when database is connected', health.status);
+  assert(healthJson.data?.database?.isConnected === true, 'health exposes real database connection state');
   const authHealth = await get('/api/auth/ok');
   assert(authHealth.status < 500, 'Better Auth handler initializes with secure cookie configuration', authHealth.status);
   const firstSettings = await get('/api/v1/settings/public');

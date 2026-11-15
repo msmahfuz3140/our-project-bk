@@ -11,6 +11,7 @@ import { apiCacheHeaders } from './middleware/cacheHeaders.middleware';
 import { performanceMiddleware } from './middleware/performance.middleware';
 import { getHealth } from './controllers/health.controller';
 import { validatePaymentEnvironment } from './config/env';
+import { validateCoreEnvironment } from './config/env';
 import { isProductionRuntime } from './config/env';
 import { logger } from './utils/logger';
 
@@ -26,6 +27,16 @@ for (const issue of paymentConfigIssues) {
     logger.error(`Payment configuration: ${issue.message}`, undefined, meta);
   } else {
     logger.warn(`Payment configuration: ${issue.message}`, meta);
+  }
+}
+
+// Validate database/auth/core production configuration.
+for (const issue of validateCoreEnvironment()) {
+  const meta = { variable: issue.variable };
+  if (issue.severity === 'ERROR') {
+    logger.error(`Core configuration: ${issue.message}`, undefined, meta);
+  } else {
+    logger.warn(`Core configuration: ${issue.message}`, meta);
   }
 }
 

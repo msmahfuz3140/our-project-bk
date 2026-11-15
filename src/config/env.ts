@@ -219,3 +219,69 @@ export function isLivePaymentsEnabled(): boolean {
   if (env.NOWPAYMENTS_ENV === 'sandbox') return true;
   return Boolean(env.NOWPAYMENTS_LIVE_ENABLED);
 }
+
+/**
+ * Core production configuration checks. These never return secret values.
+ * Called at startup and exposed sanitised by /health.
+ */
+export function validateCoreEnvironment(): PaymentConfigIssue[] {
+  const issues: PaymentConfigIssue[] = [];
+
+  if (isProductionRuntime) {
+    if (!/^mongodb(\+srv)?:\/\//i.test(env.MONGODB_URI) || /localhost|127\.0\.0\.1/i.test(env.MONGODB_URI)) {
+      issues.push({
+        variable: 'MONGODB_URI',
+        severity: 'ERROR',
+        message: 'A production MongoDB Atlas connection URI is required. The current value is missing or points to localhost.'
+      });
+    }
+
+    if (
+      env.JWT_SECRET.length < 32 ||
+      /^replace_with|change_this|default/i.test(env.JWT_SECRET)
+    ) {
+      issues.push({
+        variable: 'JWT_SECRET',
+        severity: 'ERROR',
+        message: 'JWT_SECRET must be a strong non-placeholder secret of at least 32 characters.'
+      });
+    }
+
+    if (
+      env.BETTER_AUTH_SECRET.length < 32 ||
+      /^replace_with|change_this|default/i.test(env.BETTER_AUTH_SECRET)
+    ) {
+      issues.push({
+        variable: 'BETTER_AUTH_SECRET',
+        severity: 'ERROR',
+        message: 'BETTER_AUTH_SECRET must be a strong non-placeholder secret of at least 32 characters.'
+      });
+    }
+
+    if (!env.CORS_ORIGIN.includes('accuracy.tools')) {
+      issues.push({
+        variable: 'CORS_ORIGIN',
+        severity: 'WARNING',
+        message: 'CORS_ORIGIN does not include the live accuracy.tools frontend origins.'
+      });
+    }
+
+    if (/localhost|127\.0\.0\.1/i.test(env.BACKEND_URL)) {
+      issues.push({
+        variable: 'BACKEND_URL',
+        severity: 'ERROR',
+        message: 'BACKEND_URL must be the public HTTPS backend origin in production.'
+      });
+    }
+
+    if (data.NODE_ENV !== 'production') {
+      issues.push({
+        variable: 'NODE_ENV',
+        severity: 'WARNING',
+        message: 'NODE_ENV is not "production" on a production deployment.'
+      });
+    }
+  }
+
+  return issues;
+}
