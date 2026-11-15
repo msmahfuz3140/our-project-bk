@@ -47,6 +47,23 @@ export function errorHandler(
     ip: req.ip
   });
 
+  const errName = err?.name || '';
+  const errMsg = err?.message || '';
+  const isDbError =
+    errName.includes('Mongo') ||
+    /Could not connect to any servers|buffering timed out|ECONNREFUSED|ENOTFOUND/i.test(errMsg);
+
+  if (isDbError) {
+    res.status(503).json({
+      success: false,
+      error: {
+        code: 'DATABASE_UNAVAILABLE',
+        message: 'Database is currently unreachable. Please add 0.0.0.0/0 in MongoDB Atlas Network Access.'
+      }
+    });
+    return;
+  }
+
   res.status(500).json({
     success: false,
     error: {
