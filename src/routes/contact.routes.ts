@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import { contactController } from '../controllers/contact.controller';
 import { rateLimit } from '../middleware/rateLimit.middleware';
+import { requireTurnstile } from '../middleware/turnstile.middleware';
 import { requireAuth, requireRole } from '../middleware/auth.middleware';
 import { UserRole } from '../shared/roles';
 
 const router = Router();
 
-// Public contact form (5 inquiries per 15 minutes per IP)
-router.post('/', rateLimit(5, 15, 'contact'), (req, res, next) =>
+// Public contact form (5 inquiries per 15 minutes per IP with Cloudflare Turnstile CAPTCHA)
+router.post('/', rateLimit(5, 15, 'contact'), requireTurnstile('contact'), (req, res, next) =>
   contactController.submitInquiry(req, res, next)
 );
 

@@ -7,7 +7,9 @@ export type NotificationType =
   | 'SUBSCRIPTION_EXPIRED'
   | 'SUBSCRIPTION_REVOKED'
   | 'SECURITY_ALERT'
-  | 'PLATFORM_ANNOUNCEMENT';
+  | 'PLATFORM_ANNOUNCEMENT'
+  | 'WALLET_UPDATE'
+  | 'WITHDRAWAL_UPDATE';
 
 export interface INotification extends Document {
   userId: mongoose.Types.ObjectId;
@@ -39,7 +41,9 @@ const NotificationSchema = new Schema<INotification>(
         'SUBSCRIPTION_EXPIRED',
         'SUBSCRIPTION_REVOKED',
         'SECURITY_ALERT',
-        'PLATFORM_ANNOUNCEMENT'
+        'PLATFORM_ANNOUNCEMENT',
+        'WALLET_UPDATE',
+        'WITHDRAWAL_UPDATE'
       ],
       required: true,
       index: true

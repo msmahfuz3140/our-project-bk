@@ -20,6 +20,10 @@ export interface IReferralCommission extends Document {
   commissionableAmount?: number;           // e.g. $200.00 (explicit basis excluding refunds/fees)
   commissionRate: number;                  // Snapshot at purchase time (e.g. 0.50)
   amountUsd: number;                       // Final commission amount in USD
+  referrerRole?: 'USER' | 'MODERATOR' | 'SUPER_ADMIN';
+  commissionType?: 'ONE_TIME' | 'LIFETIME';
+  idempotencyKey?: string;
+  walletTransactionId?: mongoose.Types.ObjectId;
   status: CommissionStatus;
   reversalDetails?: IReversalDetails;
   notes?: string;
@@ -75,6 +79,27 @@ const ReferralCommissionSchema = new Schema<IReferralCommission>({
     required: true,
     default: 0.50
   },
+  referrerRole: {
+    type: String,
+    enum: ['USER', 'MODERATOR', 'SUPER_ADMIN']
+  },
+  commissionType: {
+    type: String,
+    enum: ['ONE_TIME', 'LIFETIME'],
+    default: 'LIFETIME',
+    index: true
+  },
+  idempotencyKey: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
+  walletTransactionId: {
+    type: Schema.Types.ObjectId,
+    ref: 'WalletTransaction',
+    index: true
+  },
   status: {
     type: String,
     enum: ['PENDING', 'ELIGIBLE', 'APPROVED', 'CREDITED', 'REVERSED'],
@@ -97,6 +122,7 @@ const ReferralCommissionSchema = new Schema<IReferralCommission>({
 ReferralCommissionSchema.index({ moderatorId: 1, createdAt: -1 });
 ReferralCommissionSchema.index({ moderatorId: 1, status: 1 });
 ReferralCommissionSchema.index({ status: 1, createdAt: -1 });
+ReferralCommissionSchema.index({ referredUserId: 1, commissionType: 1, status: 1 });
 
 export const ReferralCommissionModel =
   mongoose.models.ReferralCommission ||

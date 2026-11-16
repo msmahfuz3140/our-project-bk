@@ -4,6 +4,8 @@ import { SubscriptionModel, ISubscription } from '../models/Subscription';
 import { PaymentModel, IPayment } from '../models/Payment';
 import { FinancialLedgerModel } from '../models/FinancialLedger';
 import { ReferralCommissionModel } from '../models/ReferralCommission';
+import { WalletModel } from '../models/Wallet';
+import { WithdrawalRequestModel } from '../models/WithdrawalRequest';
 import { AuditLogModel, IAuditLog, AuditActionType } from '../models/AuditLog';
 import { DualApprovalModel, IDualApproval, DualApprovalActionType } from '../models/DualApproval';
 import { UserRole } from '../shared/roles';
@@ -16,6 +18,7 @@ import { logger } from '../utils/logger';
 import { memoryCache } from '../utils/cache';
 import { cacheKeys } from '../utils/cache';
 import { financialService } from './financial.service';
+import { normalizeCommissionRate } from './commission.service';
 
 export interface AdminDashboardMetrics {
   totalRegisteredUsers: number;
@@ -457,17 +460,26 @@ export class AdminService {
       throw ApiError.notFound(`User ${userId} does not exist`);
     }
 
-    const [subscriptions, payments, commissions, auditLogs, allPlans] = await Promise.all([
-      SubscriptionModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
-      PaymentModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
-      ReferralCommissionModel.find({
-        $or: [{ moderatorId: user._id }, { referredUserId: user._id }]
-      }).sort({ createdAt: -1 }).limit(100).lean(),
-      AuditLogModel.find({
-        $or: [{ targetUserId: user._id }, { adminId: user._id }]
-      }).sort({ createdAt: -1 }).limit(25).lean(),
-      memoryCache.getOrSet(cacheKeys.adminAllPlans, 60, () => PlanModel.find().lean())
-    ]);
+    const [subscriptions, payments, commissions, auditLogs, allPlans, wallet, referralCommissions, withdrawals, referredUsersCount] =
+      await Promise.all([
+        SubscriptionModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
+        PaymentModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
+        ReferralCommissionModel.find({
+          $or: [{ moderatorId: user._id }, { referredUserId: user._id }]
+        }).sort({ createdAt: -1 }).limit(100).lean(),
+        AuditLogModel.find({
+          $or: [{ targetUserId: user._id }, { adminId: user._id }]
+        }).sort({ createdAt: -1 }).limit(25).lean(),
+        memoryCache.getOrSet(cacheKeys.adminAllPlans, 60, () => PlanModel.find().lean()),
+        WalletModel.findOne({ userId: user._id }).lean(),
+        ReferralCommissionModel.find({ moderatorId: user._id })
+          .populate('referredUserId', 'name email')
+          .sort({ createdAt: -1 })
+          .limit(100)
+          .lean(),
+        WithdrawalRequestModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
+        UserModel.countDocuments({ referredBy: user._id, isDeleted: { $ne: true } })
+      ]);
 
     const planMap = new Map<string, any>();
     for (const p of allPlans) {
@@ -496,6 +508,17 @@ export class AdminService {
       subscriptions: mappedSubs,
       payments: mappedPayments,
       commissions,
+      referralCommissions,
+      referredUsersCount,
+      wallet: wallet || {
+        userId: user._id,
+        currency: 'USD',
+        availableBalanceCents: 0,
+        reservedWithdrawalCents: 0,
+        lifetimeCommissionCents: 0,
+        totalWithdrawnCents: 0
+      },
+      withdrawals,
       auditLogs
     };
   }
@@ -515,6 +538,9 @@ export class AdminService {
       isEmailVerified?: boolean;
       isPhoneVerified?: boolean;
       role?: UserRole;
+      referralCommissionRate?: number;
+      referralCommissionType?: 'ONE_TIME' | 'LIFETIME';
+      referralEligible?: boolean;
       moderatorCommissionRate?: number;
       moderatorNotes?: string;
       isActive?: boolean;
@@ -532,6 +558,9 @@ export class AdminService {
       isEmailVerified: user.isEmailVerified,
       isPhoneVerified: user.isPhoneVerified,
       role: user.role,
+      referralCommissionRate: user.referralCommissionRate,
+      referralCommissionType: user.referralCommissionType,
+      referralEligible: user.referralEligible !== false,
       moderatorCommissionRate: user.moderatorCommissionRate,
       isActive: user.isActive,
       passwordChangedAt: user.passwordChangedAt?.toISOString()
@@ -572,10 +601,29 @@ export class AdminService {
     }
 
     if (input.moderatorCommissionRate !== undefined) {
-      const rate = Number(input.moderatorCommissionRate);
-      if (!isNaN(rate) && rate >= 0 && rate <= 100) {
-        user.moderatorCommissionRate = rate;
+      const normalized = normalizeCommissionRate(input.moderatorCommissionRate);
+      if (normalized > 0 && normalized <= 0.90) {
+        user.moderatorCommissionRate = normalized;
       }
+    }
+
+    if (input.referralCommissionRate !== undefined) {
+      const rate = Number(input.referralCommissionRate);
+      if (isNaN(rate) || rate < 0 || rate > 1) {
+        throw ApiError.badRequest('Referral commission rate must be between 0 and 1 (0%–100%)');
+      }
+      user.referralCommissionRate = Math.round(rate * 100) / 100;
+    }
+
+    if (input.referralCommissionType !== undefined) {
+      if (!['ONE_TIME', 'LIFETIME'].includes(input.referralCommissionType)) {
+        throw ApiError.badRequest('Referral commission type must be ONE_TIME or LIFETIME');
+      }
+      user.referralCommissionType = input.referralCommissionType;
+    }
+
+    if (input.referralEligible !== undefined) {
+      user.referralEligible = Boolean(input.referralEligible);
     }
 
     await user.save();
@@ -597,6 +645,9 @@ export class AdminService {
         isPhoneVerified: user.isPhoneVerified,
         role: user.role,
         moderatorCommissionRate: user.moderatorCommissionRate,
+        referralCommissionRate: user.referralCommissionRate,
+        referralCommissionType: user.referralCommissionType,
+        referralEligible: user.referralEligible !== false,
         isActive: user.isActive,
         mustChangePassword: user.mustChangePassword,
         passwordChangedAt: user.passwordChangedAt?.toISOString()

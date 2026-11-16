@@ -161,6 +161,15 @@ export class WebsiteSettingsService {
       changed = true;
     }
 
+    const oldWithdrawalFaq = settings.faqItems?.find(
+      (item) => item.question === 'Does the platform offer gambling or withdrawals?'
+    );
+    if (oldWithdrawalFaq && oldWithdrawalFaq.answer.includes('no withdrawal feature')) {
+      oldWithdrawalFaq.answer =
+        'No gambling or betting mechanic is offered. The platform does not hold customer stakes or player balances. Referral commission earnings are tracked in a separate wallet and may be withdrawn through the admin-reviewed payout workflow.';
+      changed = true;
+    }
+
     if (changed) {
       await settings.save().catch(() => undefined);
     }

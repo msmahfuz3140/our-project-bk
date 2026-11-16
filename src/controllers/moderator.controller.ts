@@ -172,11 +172,14 @@ export class ModeratorController {
    */
   async listCommissions(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { moderatorId, status, search, page, limit } = req.query;
+      const { moderatorId, status, commissionType, search, startDate, endDate, page, limit } = req.query;
       const result = await moderatorService.listCommissions({
         moderatorId: moderatorId as string,
         status: status as string,
+        commissionType: commissionType as string,
         search: search as string,
+        startDate: startDate as string,
+        endDate: endDate as string,
         page: page ? parseInt(page as string, 10) : undefined,
         limit: limit ? parseInt(limit as string, 10) : undefined
       });
@@ -289,19 +292,38 @@ export class ModeratorController {
     try {
       const adminId = (req as any).user.id;
       const adminEmail = (req as any).user.email;
-      const { defaultRate, reason } = req.body;
+      const { defaultRate, normalUserRate, referralEnabled, reason } = req.body;
 
       const result = await moderatorService.updateGlobalCommissionPolicy(
         adminId,
         adminEmail,
         parseFloat(defaultRate),
-        reason
+        reason,
+        normalUserRate !== undefined ? parseFloat(normalUserRate) : undefined,
+        referralEnabled !== undefined ? Boolean(referralEnabled) : undefined
       );
 
       res.status(200).json({
         success: true,
         data: result
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * GET /api/v1/admin/referrals/relationships
+   */
+  async listReferralRelationships(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await moderatorService.listReferralRelationships({
+        search: req.query.search as string,
+        referrerRole: req.query.referrerRole as string,
+        page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+        limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined
+      });
+      res.status(200).json({ success: true, data: result });
     } catch (err) {
       next(err);
     }

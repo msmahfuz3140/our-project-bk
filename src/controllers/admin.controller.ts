@@ -88,6 +88,9 @@ export class AdminController {
         moderatorCommissionRate,
         moderatorNotes,
         isActive,
+        referralCommissionRate,
+        referralCommissionType,
+        referralEligible,
         reason
       } = req.body;
 
@@ -116,7 +119,10 @@ export class AdminController {
           role,
           moderatorCommissionRate,
           moderatorNotes,
-          isActive
+          isActive,
+          referralCommissionRate,
+          referralCommissionType,
+          referralEligible
         },
         auditReason
       );

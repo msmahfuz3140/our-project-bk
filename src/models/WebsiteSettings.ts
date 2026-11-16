@@ -40,7 +40,7 @@ export const DEFAULT_SITE_FAQS: IFaqItem[] = [
   },
   {
     question: 'Does the platform offer gambling or withdrawals?',
-    answer: 'No. This is a statistical analytics SaaS platform. There is no betting mechanic, no wallet custody, no user balance, and no withdrawal feature.',
+    answer: 'No gambling or betting mechanic is offered. The platform does not hold customer stakes or player balances. Referral commission earnings are tracked in a separate wallet and may be withdrawn through the admin-reviewed payout workflow.',
     category: 'Platform',
     order: 6
   },

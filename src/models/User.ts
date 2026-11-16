@@ -34,6 +34,9 @@ export interface IUser extends Document {
   referredBy?: mongoose.Types.ObjectId;
   referredAt?: Date;
   referralCodeUsed?: string;
+  referralCommissionRate?: number;
+  referralCommissionType?: 'ONE_TIME' | 'LIFETIME';
+  referralEligible: boolean;
   moderatorCommissionRate?: number;
   moderatorNotes?: string;
   registrationIp?: string;
@@ -152,6 +155,20 @@ const UserSchema = new Schema<IUser>({
   },
   referralCodeUsed: {
     type: String,
+    index: true
+  },
+  referralCommissionRate: {
+    type: Number,
+    min: 0.0,
+    max: 1.0
+  },
+  referralCommissionType: {
+    type: String,
+    enum: ['ONE_TIME', 'LIFETIME']
+  },
+  referralEligible: {
+    type: Boolean,
+    default: true,
     index: true
   },
   moderatorCommissionRate: {

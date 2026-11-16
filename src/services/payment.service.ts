@@ -5,11 +5,11 @@ import { PaymentEventModel } from '../models/PaymentEvent';
 import { SubscriptionModel, ISubscription } from '../models/Subscription';
 import { UserModel, AccountStatus } from '../models/User';
 import { FinancialLedgerModel } from '../models/FinancialLedger';
-import { ReferralCommissionModel } from '../models/ReferralCommission';
 import { CommissionPolicyModel } from '../models/CommissionPolicy';
 import { AuditLogModel } from '../models/AuditLog';
 import { subscriptionService } from './subscription.service';
 import { websiteSettingsService } from './websiteSettings.service';
+import { commissionService, normalizeCommissionRate } from './commission.service';
 import { nowPaymentsService, NowPaymentsApiError } from './nowpayments.service';
 import { notificationService } from './notification.service';
 import { getPaymentIndexStatus } from '../database/ensureIndexes';
@@ -142,20 +142,38 @@ export class PaymentService {
     let referredByModeratorId: mongoose.Types.ObjectId | undefined;
     let referralCodeSnapshot: string | undefined;
     let commissionRateSnapshot: number | undefined;
+    let referralCommissionTypeSnapshot: 'ONE_TIME' | 'LIFETIME' | undefined;
+    let referralCommissionEligibleSnapshot = false;
 
     const userDoc = await UserModel.findById(userId);
     if (userDoc && userDoc.referredBy) {
-      const moderatorDoc = await UserModel.findById(userDoc.referredBy);
+      const referrerDoc = await UserModel.findById(userDoc.referredBy);
       if (
-        moderatorDoc &&
-        moderatorDoc.role === UserRole.MODERATOR &&
-        moderatorDoc.accountStatus === AccountStatus.ACTIVE &&
-        !moderatorDoc.isDeleted
+        referrerDoc &&
+        referrerDoc.accountStatus === AccountStatus.ACTIVE &&
+        referrerDoc.referralEligible !== false &&
+        !referrerDoc.isDeleted
       ) {
-        referredByModeratorId = moderatorDoc._id;
-        referralCodeSnapshot = userDoc.referralCodeUsed || moderatorDoc.referralCode;
         const activePolicy = await CommissionPolicyModel.getActivePolicy();
-        commissionRateSnapshot = moderatorDoc.moderatorCommissionRate ?? activePolicy.defaultRate ?? 0.50;
+        if (activePolicy.referralEnabled !== false) {
+          const isModerator = referrerDoc.role === UserRole.MODERATOR;
+          referredByModeratorId = referrerDoc._id;
+          referralCodeSnapshot = userDoc.referralCodeUsed || referrerDoc.referralCode;
+          referralCommissionTypeSnapshot =
+            referrerDoc.referralCommissionType || (isModerator ? 'LIFETIME' : 'ONE_TIME');
+          commissionRateSnapshot =
+            referrerDoc.referralCommissionRate !== undefined
+              ? normalizeCommissionRate(referrerDoc.referralCommissionRate)
+              : normalizeCommissionRate(
+                  isModerator
+                    ? referrerDoc.moderatorCommissionRate ??
+                      activePolicy.moderatorRate ??
+                      activePolicy.defaultRate ??
+                      0.5
+                    : activePolicy.normalUserRate ?? 0.3
+                );
+          referralCommissionEligibleSnapshot = true;
+        }
       }
     }
 
@@ -379,6 +397,8 @@ export class PaymentService {
       referredByModeratorId,
       referralCodeSnapshot,
       commissionRateSnapshot,
+      referralCommissionTypeSnapshot,
+      referralCommissionEligibleSnapshot,
       ipnHistory: []
     });
 
@@ -1436,41 +1456,23 @@ export class PaymentService {
       ).catch(() => null);
 
       const payingUser = await UserModel.findById(claimedPayment.userId);
-      const targetModeratorId = claimedPayment.referredByModeratorId || payingUser?.referredBy;
+      const targetReferrerId = claimedPayment.referredByModeratorId || payingUser?.referredBy;
 
-      if (targetModeratorId) {
-        const moderatorUser = await UserModel.findById(targetModeratorId);
-        if (
-          moderatorUser &&
-          moderatorUser.role === UserRole.MODERATOR &&
-          moderatorUser.accountStatus === AccountStatus.ACTIVE &&
-          !moderatorUser.isDeleted
-        ) {
-          const existingCommission = await ReferralCommissionModel.findOne({ paymentId: claimedPayment._id });
-          if (!existingCommission) {
-            const activePolicy = await CommissionPolicyModel.getActivePolicy();
-            const rate =
-              claimedPayment.commissionRateSnapshot ??
-              moderatorUser.moderatorCommissionRate ??
-              activePolicy.defaultRate ??
-              0.50;
-            const commissionAmountUsd = Math.round(claimedPayment.priceAmount * rate * 100) / 100;
-
-            await ReferralCommissionModel.create({
-              moderatorId: moderatorUser._id,
-              referredUserId: payingUser!._id,
-              subscriptionId: subscription._id,
-              paymentId: claimedPayment._id,
-              purchaseId: claimedPayment.orderId,
-              subscriptionPlan: claimedPayment.planId,
-              originalPurchaseAmount: claimedPayment.priceAmount,
-              commissionableAmount: claimedPayment.priceAmount,
-              commissionRate: rate,
-              amountUsd: commissionAmountUsd,
-              status: 'CREDITED'
-            });
-          }
+      if (targetReferrerId) {
+        // Legacy orders may not contain the referral snapshot; use the
+        // permanent referredBy relationship as a safe fallback.
+        if (!claimedPayment.referredByModeratorId) {
+          claimedPayment.referredByModeratorId = targetReferrerId as mongoose.Types.ObjectId;
         }
+
+        await commissionService
+          .awardForPayment(claimedPayment, subscription._id.toString())
+          .catch((commissionError: any) => {
+            logger.error('Referral commission award failed after verified payment', {
+              orderId: claimedPayment.orderId,
+              error: commissionError?.message
+            });
+          });
       }
 
       const finalPayment = await PaymentModel.findById(claimedPayment._id);
@@ -1519,18 +1521,17 @@ export class PaymentService {
       }
     }
 
-    await ReferralCommissionModel.updateMany(
-      { paymentId: payment._id, status: { $ne: 'REVERSED' } },
-      {
-        $set: {
-          status: 'REVERSED',
-          reversalDetails: {
-            reversedAt: new Date(),
-            reason: `Payment refunded via NOWPayments (payment ${providerPaymentId})`
-          }
-        }
-      }
-    ).catch(() => null);
+    await commissionService
+      .reversePaymentCommissions(
+        payment._id.toString(),
+        `Payment refunded via NOWPayments (payment ${providerPaymentId})`
+      )
+      .catch((error: any) => {
+        logger.error('Failed to reverse referral commissions after refund', {
+          orderId: payment.orderId,
+          error: error?.message
+        });
+      });
 
     const existingRefund = await FinancialLedgerModel.findOne({
       orderId: payment.orderId,

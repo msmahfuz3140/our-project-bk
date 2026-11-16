@@ -76,6 +76,8 @@ export interface IPayment extends Document {
   referredByModeratorId?: mongoose.Types.ObjectId;
   referralCodeSnapshot?: string;
   commissionRateSnapshot?: number;
+  referralCommissionTypeSnapshot?: 'ONE_TIME' | 'LIFETIME';
+  referralCommissionEligibleSnapshot?: boolean;
   rawIpnData?: Record<string, unknown>;
   ipnHistory: IipnEvent[];
   createdAt: Date;
@@ -285,6 +287,13 @@ const PaymentSchema = new Schema<IPayment>({
   },
   commissionRateSnapshot: {
     type: Number
+  },
+  referralCommissionTypeSnapshot: {
+    type: String,
+    enum: ['ONE_TIME', 'LIFETIME']
+  },
+  referralCommissionEligibleSnapshot: {
+    type: Boolean
   },
   rawIpnData: {
     type: Schema.Types.Mixed

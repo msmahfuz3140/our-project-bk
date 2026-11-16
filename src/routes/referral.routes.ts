@@ -26,14 +26,16 @@ router.post('/click', rateLimit(60, 15, 'referral_click'), async (req, res, next
     }
 
     const referralCode = parsed.data.referralCode.trim().toUpperCase();
-    const moderator: any = await UserModel.findOne({
+    const referrer: any = await UserModel.findOne({
       referralCode,
-      role: UserRole.MODERATOR,
+      role: { $in: [UserRole.USER, UserRole.MODERATOR] },
+      referralEligible: { $ne: false },
+      accountStatus: 'ACTIVE',
       isDeleted: { $ne: true }
     }).select('_id').lean();
 
     // Do not reveal whether a referral code is valid to anonymous callers.
-    if (!moderator) {
+    if (!referrer) {
       res.status(202).json({ success: true });
       return;
     }
@@ -45,7 +47,7 @@ router.post('/click', rateLimit(60, 15, 'referral_click'), async (req, res, next
 
     await ReferralClickModel.create({
       referralCode,
-      moderatorId: moderator._id,
+      moderatorId: referrer._id,
       landingPath: parsed.data.path || '/gerister',
       referrer: parsed.data.referrer,
       ipHash,

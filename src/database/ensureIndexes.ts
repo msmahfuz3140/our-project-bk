@@ -7,6 +7,11 @@ import { OtpVerificationModel } from '../models/OtpVerification';
 import { ContactMessageModel } from '../models/ContactMessage';
 import { SecurityLogModel } from '../models/SecurityLog';
 import { ReferralClickModel } from '../models/ReferralClick';
+import { ReferralCommissionModel } from '../models/ReferralCommission';
+import { CommissionPolicyModel } from '../models/CommissionPolicy';
+import { WalletModel } from '../models/Wallet';
+import { WalletTransactionModel } from '../models/WalletTransaction';
+import { WithdrawalRequestModel } from '../models/WithdrawalRequest';
 import { SystemMigrationModel } from '../models/SystemMigration';
 import { logger } from '../utils/logger';
 
@@ -37,6 +42,12 @@ export async function ensurePaymentIndexes(): Promise<boolean> {
       ContactMessageModel.createIndexes(),
       SecurityLogModel.createIndexes(),
       ReferralClickModel.createIndexes(),
+      ReferralCommissionModel.createIndexes(),
+      CommissionPolicyModel.createIndexes(),
+      WalletModel.createIndexes(),
+      WalletTransactionModel.createIndexes(),
+      WithdrawalRequestModel.createIndexes(),
+      UserModel.createIndexes(),
       SystemMigrationModel.createIndexes(),
       OtpVerificationModel.createIndexes()
     ]);

@@ -110,11 +110,18 @@ export class AuthService {
       const referrer = await userRepository.findByReferralCode(cleanCode);
 
       if (referrer) {
-        // 1. Only active Moderators generate qualifying referral attribution
-        if (referrer.role !== UserRole.MODERATOR) {
-          logger.warn(`Referral rejected: Referrer ${referrer._id} does not have MODERATOR role.`);
-        } else if (referrer.accountStatus !== AccountStatus.ACTIVE || !referrer.isActive || referrer.isDeleted) {
-          logger.warn(`Referral rejected: Moderator ${referrer._id} is inactive, suspended, or blocked.`);
+        // Any eligible, active normal user or moderator can refer customers.
+        // Super Admins are platform operators and do not participate in the
+        // affiliate payout program unless explicitly given a moderator role.
+        if (![UserRole.USER, UserRole.MODERATOR].includes(referrer.role)) {
+          logger.warn(`Referral rejected: Referrer ${referrer._id} has ineligible role ${referrer.role}.`);
+        } else if (
+          referrer.accountStatus !== AccountStatus.ACTIVE ||
+          !referrer.isActive ||
+          referrer.isDeleted ||
+          referrer.referralEligible === false
+        ) {
+          logger.warn(`Referral rejected: Referrer ${referrer._id} is inactive, ineligible, suspended, or blocked.`);
         } else {
           // 2. Self-referral prevention (email alias + phone)
           const isSelfEmail = referrer.email && (

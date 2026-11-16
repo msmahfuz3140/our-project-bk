@@ -645,6 +645,11 @@ export class ModeratorService {
       totalReversedCommissionUsd: Math.round(totalReversedCommissionUsd * 100) / 100,
       globalCommissionPolicy: {
         defaultRate: activePolicy.defaultRate,
+        normalUserRate: activePolicy.normalUserRate ?? 0.30,
+        moderatorRate: activePolicy.moderatorRate ?? activePolicy.defaultRate ?? 0.50,
+        referralEnabled: activePolicy.referralEnabled !== false,
+        normalUserCommissionType: 'ONE_TIME',
+        moderatorCommissionType: 'LIFETIME',
         commissionableBasis: activePolicy.commissionableBasis,
         description: activePolicy.description,
         effectiveFrom: activePolicy.effectiveFrom
@@ -658,7 +663,10 @@ export class ModeratorService {
   async listCommissions(query: {
     moderatorId?: string;
     status?: string;
+    commissionType?: string;
     search?: string;
+    startDate?: string;
+    endDate?: string;
     page?: number;
     limit?: number;
   }): Promise<{
@@ -681,16 +689,37 @@ export class ModeratorService {
       filter.status = query.status;
     }
 
+    if (query.commissionType && query.commissionType !== 'ALL') {
+      filter.commissionType = query.commissionType;
+    }
+
+    if (query.startDate || query.endDate) {
+      filter.createdAt = {};
+      if (query.startDate) filter.createdAt.$gte = new Date(query.startDate);
+      if (query.endDate) filter.createdAt.$lte = new Date(query.endDate);
+    }
+
     if (query.search && query.search.trim() !== '') {
       const cleanSearch = query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(cleanSearch, 'i');
-      filter.$or = [{ purchaseId: regex }, { subscriptionPlan: regex }];
+      const users = await UserModel.find({
+        $or: [{ name: regex }, { email: regex }, { phone: regex }]
+      })
+        .select('_id')
+        .lean();
+      const userIds = users.map((u) => u._id);
+      filter.$or = [
+        { purchaseId: regex },
+        { subscriptionPlan: regex },
+        { moderatorId: { $in: userIds } },
+        { referredUserId: { $in: userIds } }
+      ];
     }
 
     const [commissions, total] = await Promise.all([
       ReferralCommissionModel.find(filter)
-        .populate('moderatorId', 'name email referralCode')
-        .populate('referredUserId', 'name email phone')
+        .populate('moderatorId', 'name email referralCode role referralCommissionRate referralCommissionType')
+        .populate('referredUserId', 'name email phone role')
         .populate('paymentId', 'orderId planId priceAmount status payCurrency createdAt')
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -870,6 +899,93 @@ export class ModeratorService {
   }
 
   /**
+   * 9c. Referral relationships (normal users and moderators)
+   */
+  async listReferralRelationships(options: {
+    search?: string;
+    referrerRole?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<any> {
+    const page = Math.max(1, options.page || 1);
+    const limit = Math.min(100, Math.max(1, options.limit || 25));
+    const query: Record<string, any> = {
+      referredBy: { $exists: true, $ne: null },
+      isDeleted: { $ne: true }
+    };
+
+    if (options.referrerRole && options.referrerRole !== 'ALL') {
+      const referrers = await UserModel.find({
+        role: options.referrerRole,
+        isDeleted: { $ne: true }
+      })
+        .select('_id')
+        .lean();
+      query.referredBy = { $in: referrers.map((r) => r._id) };
+    }
+
+    if (options.search && options.search.trim()) {
+      const escaped = options.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      const users = await UserModel.find({
+        $or: [{ name: regex }, { email: regex }, { referralCode: regex }]
+      })
+        .select('_id')
+        .lean();
+      const ids = users.map((u) => u._id);
+      query.$or = [
+        { _id: { $in: ids } },
+        { referredBy: { $in: ids } },
+        { name: regex },
+        { email: regex },
+        { referralCodeUsed: regex }
+      ];
+    }
+
+    const [relationships, total] = await Promise.all([
+      UserModel.find(query)
+        .populate('referredBy', 'name email role referralCode referralCommissionRate referralCommissionType referralEligible')
+        .select('name email phone role referralCodeUsed referredAt createdAt accountStatus')
+        .sort({ referredAt: -1, createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      UserModel.countDocuments(query)
+    ]);
+
+    const userIds = relationships.map((r: any) => r._id);
+    const commissions = await ReferralCommissionModel.find({ referredUserId: { $in: userIds } })
+      .select('referredUserId amountUsd status commissionType paymentId')
+      .lean();
+    const commissionMap = new Map<string, any[]>();
+    for (const commission of commissions as any[]) {
+      const key = commission.referredUserId.toString();
+      if (!commissionMap.has(key)) commissionMap.set(key, []);
+      commissionMap.get(key)!.push(commission);
+    }
+
+    return {
+      relationships: (relationships as any[]).map((relationship) => {
+        const rows = commissionMap.get(relationship._id.toString()) || [];
+        return {
+          ...relationship,
+          referredUserId: relationship._id,
+          commissions: rows,
+          successfulPurchases: rows.filter((row) => row.status !== 'REVERSED').length,
+          commissionEarnedUsd: Math.round(
+            rows
+              .filter((row) => row.status === 'CREDITED' || row.status === 'APPROVED')
+              .reduce((sum, row) => sum + (row.amountUsd || 0), 0) * 100
+          ) / 100
+        };
+      }),
+      total,
+      page,
+      totalPages: Math.max(1, Math.ceil(total / limit))
+    };
+  }
+
+  /**
    * 10. Export Commissions report to CSV
    */
   async exportCommissionsCsv(query: { moderatorId?: string; status?: string }): Promise<string> {
@@ -919,7 +1035,9 @@ export class ModeratorService {
     adminId: string,
     adminEmail: string,
     newRate: number,
-    reason: string
+    reason: string,
+    normalUserRate?: number,
+    referralEnabled?: boolean
   ): Promise<any> {
     if (!reason || reason.trim() === '') {
       throw ApiError.badRequest('Audit reason required to update platform commission policy');
@@ -931,16 +1049,26 @@ export class ModeratorService {
     }
 
     if (newRate < 0.05 || newRate > 0.90) {
-      throw ApiError.badRequest('Platform default commission rate must be between 5% (0.05) and 90% (0.90)');
+      throw ApiError.badRequest('Moderator default commission rate must be between 5% (0.05) and 90% (0.90)');
+    }
+    if (normalUserRate !== undefined && (normalUserRate < 0.01 || normalUserRate > 0.90)) {
+      throw ApiError.badRequest('Normal user commission rate must be between 1% (0.01) and 90% (0.90)');
     }
 
     const prevPolicy = await CommissionPolicyModel.getActivePolicy();
     const roundedRate = Math.round(newRate * 100) / 100;
+    const roundedNormalRate = Math.round((normalUserRate ?? prevPolicy.normalUserRate ?? 0.30) * 100) / 100;
+    const enabled = referralEnabled ?? prevPolicy.referralEnabled !== false;
 
     const newPolicy = await CommissionPolicyModel.create({
       defaultRate: roundedRate,
+      moderatorRate: roundedRate,
+      normalUserRate: roundedNormalRate,
+      normalUserCommissionType: 'ONE_TIME',
+      moderatorCommissionType: 'LIFETIME',
+      referralEnabled: enabled,
       commissionableBasis: prevPolicy.commissionableBasis,
-      description: `Default platform commission is exactly ${(roundedRate * 100).toFixed(0)}% of qualifying confirmed subscription sales. Basis strictly excludes unconfirmed, failed, or refunded orders.`,
+      description: `Normal users earn ${(roundedNormalRate * 100).toFixed(0)}% one-time commission per referred customer; moderators earn ${(roundedRate * 100).toFixed(0)}% lifetime commission on every eligible confirmed purchase.`,
       updatedByAdminId: new mongoose.Types.ObjectId(adminId),
       updatedByAdminEmail: adminEmail,
       auditReason: reason.trim(),
@@ -952,12 +1080,22 @@ export class ModeratorService {
       adminId: new mongoose.Types.ObjectId(adminId),
       adminEmail,
       reason: reason.trim(),
-      previousValue: { defaultRate: prevPolicy.defaultRate },
-      newValue: { defaultRate: roundedRate },
+      previousValue: {
+        defaultRate: prevPolicy.defaultRate,
+        normalUserRate: prevPolicy.normalUserRate ?? 0.30,
+        referralEnabled: prevPolicy.referralEnabled !== false
+      },
+      newValue: {
+        defaultRate: roundedRate,
+        normalUserRate: roundedNormalRate,
+        referralEnabled: enabled
+      },
       details: { policyId: newPolicy._id.toString() }
     });
 
-    logger.info(`Main Admin ${adminEmail} updated platform default commission rate to ${(roundedRate * 100).toFixed(0)}%`);
+    logger.info(
+      `Main Admin ${adminEmail} updated referral policy: normal ${(roundedNormalRate * 100).toFixed(0)}% one-time, moderator ${(roundedRate * 100).toFixed(0)}% lifetime, enabled=${enabled}`
+    );
 
     return newPolicy;
   }
@@ -1070,7 +1208,7 @@ export class ModeratorService {
       },
       recentCommissions,
       nonCustodialNotice:
-        'Commission reporting is strictly for accounting and transparency. The platform operates a non-custodial model with zero withdrawal features.'
+        'Non-custodial model: the platform never holds betting stakes or player deposits. Referral commissions are tracked in your earnings wallet and may be withdrawn through the approved withdrawal workflow.'
     };
     });
   }

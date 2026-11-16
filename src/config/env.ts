@@ -66,7 +66,10 @@ const envSchema = z.object({
   TWILIO_AUTH_TOKEN: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
   TWILIO_FROM_NUMBER: z.string().optional(),
-  LOG_LEVEL: z.enum(['DEBUG', 'INFO', 'WARN', 'ERROR']).default('INFO')
+  LOG_LEVEL: z.enum(['DEBUG', 'INFO', 'WARN', 'ERROR']).default('INFO'),
+
+  // Cloudflare Turnstile Server-side Secret Key (never exposed to client)
+  TURNSTILE_SECRET_KEY: z.string().default('')
 });
 
 const parsed = envSchema.safeParse(process.env);

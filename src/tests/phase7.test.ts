@@ -181,7 +181,7 @@ async function runPhase7Tests() {
     });
     testAssert(selfAudit !== null, 'Self-referral attempt detected and flagged in audit log');
 
-    // Test 2.3: Non-moderator referral code rejected
+    // Test 2.3: Normal user referral code is now a valid one-time referrer
     const normalUser = await UserModel.create({
       name: 'Normal User',
       email: 'normal@user.com',
@@ -199,7 +199,10 @@ async function runPhase7Tests() {
     });
 
     const buyerUnderUser = await UserModel.findOne({ email: 'buyer.under.user@test.com' });
-    testAssert(buyerUnderUser?.referredBy === undefined || buyerUnderUser?.referredBy === null, 'Non-moderator referral code grants zero referral attribution');
+    testAssert(
+      buyerUnderUser?.referredBy?.toString() === normalUser._id.toString(),
+      'Normal user referral code grants permanent referral attribution'
+    );
 
     // Test 2.4: Suspended moderator code rejected
     await moderatorService.updateModeratorStatus(
@@ -445,7 +448,11 @@ async function runPhase7Tests() {
     testAssert(modDashboard.profile.referralCode === moderatorUser.referralCode, 'Dashboard displays correct referral code');
     testAssert(modDashboard.profile.referralLink.includes(moderatorUser.referralCode), 'Dashboard formats full referral link');
     testAssert(modDashboard.metrics.referralRegistrations >= 1, 'Dashboard counts referral registrations');
-    testAssert(modDashboard.nonCustodialNotice.includes('zero withdrawal features'), 'Dashboard displays explicit non-custodial notice');
+    testAssert(
+      modDashboard.nonCustodialNotice.toLowerCase().includes('non-custodial') &&
+        modDashboard.nonCustodialNotice.toLowerCase().includes('withdrawn'),
+      'Dashboard displays updated non-custodial earnings/withdrawal policy'
+    );
 
     // Privacy masking check for referred users list
     const maskedUsers = await moderatorService.getModeratorSelfReferredUsers(moderatorUser._id.toString());

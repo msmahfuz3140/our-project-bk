@@ -4,6 +4,7 @@ import { moderatorController } from '../controllers/moderator.controller';
 import { adminSettingsController } from '../controllers/adminSettings.controller';
 import { financialController } from '../controllers/financial.controller';
 import { systemController } from '../controllers/system.controller';
+import { walletController } from '../controllers/wallet.controller';
 import { requireAuth, requireRole } from '../middleware/auth.middleware';
 import { UserRole } from '../shared/roles';
 
@@ -91,6 +92,10 @@ router.get('/referrals/commissions', (req, res, next) =>
   moderatorController.listCommissions(req, res, next)
 );
 
+router.get('/referrals/relationships', (req, res, next) =>
+  moderatorController.listReferralRelationships(req, res, next)
+);
+
 router.post('/referrals/commissions/:commissionId/status', (req, res, next) =>
   moderatorController.updateCommissionStatus(req, res, next)
 );
@@ -113,6 +118,32 @@ router.post('/referrals/policy', (req, res, next) =>
 
 router.get('/referrals/fraud-alerts', (req, res, next) =>
   moderatorController.getFraudAlerts(req, res, next)
+);
+
+// Wallet, withdrawal and financial-ledger administration
+router.get('/referrals/wallets', (req, res, next) =>
+  walletController.adminListWallets(req as any, res, next)
+);
+router.get('/referrals/wallet-stats', (req, res, next) =>
+  walletController.adminWalletStats(req as any, res, next)
+);
+router.post('/referrals/wallets/adjust', (req, res, next) =>
+  walletController.adminAdjustBalance(req as any, res, next)
+);
+router.get('/referrals/transactions', (req, res, next) =>
+  walletController.adminListTransactions(req as any, res, next)
+);
+router.get('/referrals/withdrawals', (req, res, next) =>
+  walletController.adminListWithdrawals(req as any, res, next)
+);
+router.post('/referrals/withdrawals/:id/approve', (req, res, next) =>
+  walletController.adminApproveWithdrawal(req as any, res, next)
+);
+router.post('/referrals/withdrawals/:id/reject', (req, res, next) =>
+  walletController.adminRejectWithdrawal(req as any, res, next)
+);
+router.post('/referrals/withdrawals/:id/paid', (req, res, next) =>
+  walletController.adminMarkWithdrawalPaid(req as any, res, next)
 );
 
 // Audit Logs
