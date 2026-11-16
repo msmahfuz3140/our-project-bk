@@ -39,7 +39,7 @@ const PlanSchema = new Schema<IPlanDocument>({
   priceCents: {
     type: Number,
     required: true,
-    min: 100 // At least $1.00
+    min: 20 // Platform minimum is configurable in Admin → Payment Settings
   },
   duration: {
     unit: {

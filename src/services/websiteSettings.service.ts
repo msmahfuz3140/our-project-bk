@@ -42,6 +42,17 @@ function safeTelegramSetting(input: string | undefined): string {
   return safeSettingUrl(value, false);
 }
 
+function normalizeTelegramPaymentSupport(input: string | undefined): string {
+  const value = (input || '').trim();
+  if (!value) return '';
+  const safe = safeTelegramSetting(value);
+  if (safe) return safe;
+  const match = value.match(
+    /^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/([A-Za-z0-9_]{4,64})/i
+  );
+  return match ? `https://t.me/${match[1]}` : '';
+}
+
 export class WebsiteSettingsService {
   /**
    * Migrate persisted branding left over from the old product name. This keeps
@@ -121,6 +132,15 @@ export class WebsiteSettingsService {
       changed = true;
     }
 
+    if (!settings.paymentSettings) {
+      settings.paymentSettings = {
+        minPlanPriceCents: 20,
+        paymentSupportEnabled: true,
+        paymentSupportTelegram: ''
+      };
+      changed = true;
+    }
+
     const legacyHeroTitle = 'Algorithmic Roulette Intelligence & Statistical Wheel Tracking';
     if (settings.homepageContent?.heroTitle === legacyHeroTitle) {
       settings.homepageContent.heroTitle = 'Read the wheel. Time the pattern.';
@@ -172,6 +192,14 @@ export class WebsiteSettingsService {
             'Join our official Telegram community for live table alerts, platform updates, and direct access to the Accuracy.tools team.',
           buttonText: plain.community?.buttonText || 'Join Our Telegram Community'
         },
+        paymentSettings: {
+          minPlanPriceCents:
+            typeof plain.paymentSettings?.minPlanPriceCents === 'number'
+              ? plain.paymentSettings.minPlanPriceCents
+              : 20,
+          paymentSupportEnabled: plain.paymentSettings?.paymentSupportEnabled !== false,
+          paymentSupportTelegram: plain.paymentSettings?.paymentSupportTelegram || ''
+        },
         footerContent: plain.footerContent,
         faqItems: plain.faqItems,
         legalPolicies: plain.legalPolicies,
@@ -187,6 +215,31 @@ export class WebsiteSettingsService {
     const settings = await WebsiteSettingsModel.getSettings();
     await this.migrateBranding(settings);
     return settings;
+  }
+
+  /**
+   * Payment configuration used by backend validation and the payment UI.
+   */
+  async getPaymentSettings(): Promise<{
+    minPlanPriceCents: number;
+    paymentSupportEnabled: boolean;
+    paymentSupportTelegram: string;
+  }> {
+    try {
+      const settings = await WebsiteSettingsModel.getSettings();
+      const min = Number(settings.paymentSettings?.minPlanPriceCents);
+      return {
+        minPlanPriceCents: Number.isFinite(min) && min >= 20 ? Math.round(min) : 20,
+        paymentSupportEnabled: settings.paymentSettings?.paymentSupportEnabled !== false,
+        paymentSupportTelegram: settings.paymentSettings?.paymentSupportTelegram || ''
+      };
+    } catch {
+      return {
+        minPlanPriceCents: 20,
+        paymentSupportEnabled: true,
+        paymentSupportTelegram: ''
+      };
+    }
   }
 
   /**
@@ -213,7 +266,8 @@ export class WebsiteSettingsService {
       brandColors: settings.brandColors,
       supportContact: settings.supportContact,
       homepageContent: settings.homepageContent,
-      community: settings.community
+      community: settings.community,
+      paymentSettings: settings.paymentSettings
     };
 
     if (updates.siteName !== undefined) {
@@ -291,6 +345,25 @@ export class WebsiteSettingsService {
       };
     }
 
+    if (updates.paymentSettings) {
+      const current = settings.paymentSettings || ({} as IWebsiteSettings['paymentSettings']);
+      const rawMin = Number(updates.paymentSettings.minPlanPriceCents);
+      settings.paymentSettings = {
+        minPlanPriceCents:
+          Number.isFinite(rawMin) && rawMin >= 20
+            ? Math.round(rawMin)
+            : current.minPlanPriceCents || 20,
+        paymentSupportEnabled:
+          updates.paymentSettings.paymentSupportEnabled !== undefined
+            ? Boolean(updates.paymentSettings.paymentSupportEnabled)
+            : current.paymentSupportEnabled !== false,
+        paymentSupportTelegram:
+          updates.paymentSettings.paymentSupportTelegram !== undefined
+            ? normalizeTelegramPaymentSupport(updates.paymentSettings.paymentSupportTelegram)
+            : current.paymentSupportTelegram || ''
+      };
+    }
+
     if (updates.footerContent) {
       settings.footerContent = {
         copyrightText: sanitizeHtmlContent(updates.footerContent.copyrightText || settings.footerContent.copyrightText),
@@ -332,7 +405,8 @@ export class WebsiteSettingsService {
         brandColors: settings.brandColors,
         supportContact: settings.supportContact,
         homepageContent: settings.homepageContent,
-        community: settings.community
+        community: settings.community,
+        paymentSettings: settings.paymentSettings
       },
       details: {
         sanitized: true,

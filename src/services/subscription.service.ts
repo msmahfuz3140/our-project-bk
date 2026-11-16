@@ -2,7 +2,8 @@ import {
   SubscriptionPlan,
   UpdatePlanInput,
   CreatePlanInput,
-  PLANS_ARRAY
+  PLANS_ARRAY,
+  formatCentsToUsd
 } from '../shared/plans';
 import { subscriptionRepository } from '../repositories/subscription.repository';
 import { PlanModel, seedPlansIfEmpty, IPlanDocument } from '../models/Plan';
@@ -11,6 +12,7 @@ import { UserModel } from '../models/User';
 import { AuditLogModel } from '../models/AuditLog';
 import { ApiError } from '../utils/apiError';
 import { cacheKeys, memoryCache } from '../utils/cache';
+import { websiteSettingsService } from './websiteSettings.service';
 import mongoose from 'mongoose';
 
 export class SubscriptionService {
@@ -137,6 +139,13 @@ export class SubscriptionService {
 
     await seedPlansIfEmpty();
 
+    const { minPlanPriceCents } = await websiteSettingsService.getPaymentSettings();
+    if (!Number.isInteger(input.priceCents) || input.priceCents < minPlanPriceCents) {
+      throw ApiError.badRequest(
+        `Plan price must be at least ${formatCentsToUsd(minPlanPriceCents)} (configured platform minimum).`
+      );
+    }
+
     const planId = input.id
       ? input.id.trim().toUpperCase().replace(/\s+/g, '_')
       : `PLAN_${input.name.trim().toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
@@ -218,8 +227,11 @@ export class SubscriptionService {
     };
 
     if (input.priceCents !== undefined) {
-      if (!Number.isInteger(input.priceCents) || input.priceCents < 100) {
-        throw ApiError.badRequest('Price must be a valid positive integer in cents (minimum 100 cents / $1.00)');
+      const { minPlanPriceCents } = await websiteSettingsService.getPaymentSettings();
+      if (!Number.isInteger(input.priceCents) || input.priceCents < minPlanPriceCents) {
+        throw ApiError.badRequest(
+          `Price must be a valid integer in cents and at least ${formatCentsToUsd(minPlanPriceCents)} (configured platform minimum).`
+        );
       }
       planDoc.priceCents = input.priceCents;
     }

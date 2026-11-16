@@ -9,6 +9,7 @@ import { ReferralCommissionModel } from '../models/ReferralCommission';
 import { CommissionPolicyModel } from '../models/CommissionPolicy';
 import { AuditLogModel } from '../models/AuditLog';
 import { subscriptionService } from './subscription.service';
+import { websiteSettingsService } from './websiteSettings.service';
 import { nowPaymentsService, NowPaymentsApiError } from './nowpayments.service';
 import { notificationService } from './notification.service';
 import { getPaymentIndexStatus } from '../database/ensureIndexes';
@@ -20,7 +21,7 @@ import {
   AdminPaymentSummary,
   PaymentHistoryDTO
 } from '../shared/subscriptions';
-import { calculatePlanExpiration } from '../shared/plans';
+import { calculatePlanExpiration, formatCentsToUsd } from '../shared/plans';
 import { generateRandomString } from '../utils/crypto';
 import { cacheKeys, invalidatePaymentCaches, memoryCache } from '../utils/cache';
 import { ApiError } from '../utils/apiError';
@@ -114,6 +115,15 @@ export class PaymentService {
 
     if (!plan.isActive) {
       throw ApiError.badRequest(`Plan ${plan.name} is currently inactive and cannot be purchased`);
+    }
+
+    const { minPlanPriceCents } = await websiteSettingsService.getPaymentSettings();
+    if (plan.priceCents < minPlanPriceCents) {
+      throw new ApiError(
+        400,
+        `This plan is below the platform minimum of ${formatCentsToUsd(minPlanPriceCents)}. Please contact support or choose another plan.`,
+        'PLAN_BELOW_MINIMUM'
+      );
     }
 
     const normalizedPayCurrency = String(payCurrency || 'USDTTRC20')

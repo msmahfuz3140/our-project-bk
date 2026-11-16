@@ -3,6 +3,8 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { subscriptionAccessService } from '../services/subscriptionAccess.service';
 import { adminService } from '../services/admin.service';
 import { websiteSettingsService } from '../services/websiteSettings.service';
+import { paymentService } from '../services/payment.service';
+import { subscriptionService } from '../services/subscription.service';
 import { UserModel } from '../models/User';
 import { SubscriptionModel } from '../models/Subscription';
 import { UserRole } from '../shared/roles';
@@ -268,6 +270,97 @@ async function run() {
   );
   assert(disabled.community.enabled === false, 'community section can be disabled from admin settings');
 
+  // -------------------------------------------------------------------
+  console.log('\n[7. Dynamic minimum plan price and payment support settings]');
+  const paymentConfigured = await websiteSettingsService.updateSettings(
+    admin._id.toString(),
+    admin.email!,
+    {
+      paymentSettings: {
+        minPlanPriceCents: 1_000_000,
+        paymentSupportEnabled: false,
+        paymentSupportTelegram: '@phase14_support'
+      }
+    } as any,
+    'Phase 14 payment settings verification'
+  );
+  assert(
+    paymentConfigured.paymentSettings.minPlanPriceCents === 1_000_000,
+    'admin minimum plan price persisted in cents'
+  );
+  assert(
+    paymentConfigured.paymentSettings.paymentSupportEnabled === false,
+    'payment support button can be disabled'
+  );
+  assert(
+    paymentConfigured.paymentSettings.paymentSupportTelegram === '@phase14_support',
+    'payment support Telegram handle persisted'
+  );
+
+  const publicPaymentSettings = await websiteSettingsService.getPublicSettings();
+  assert(
+    publicPaymentSettings.paymentSettings?.minPlanPriceCents === 1_000_000,
+    'public settings expose the admin-configured minimum price'
+  );
+
+  let belowMinimumPlanRejected = false;
+  try {
+    await subscriptionService.createPlan(
+      {
+        id: 'PLAN_PHASE14_LOW',
+        name: 'Below Minimum Test',
+        description: 'Should be rejected by dynamic minimum',
+        priceCents: 500_000,
+        durationUnit: 'DAYS',
+        durationValue: 1,
+        features: []
+      },
+      admin._id.toString()
+    );
+  } catch (err: any) {
+    belowMinimumPlanRejected = true;
+  }
+  assert(belowMinimumPlanRejected, 'plan creation below the configured minimum is rejected');
+
+  let belowMinimumOrderRejected = false;
+  try {
+    await paymentService.createPurchaseOrder(member._id.toString(), 'PLAN_15_DAYS', 'TRX');
+  } catch (err: any) {
+    belowMinimumOrderRejected = err?.code === 'PLAN_BELOW_MINIMUM';
+  }
+  assert(belowMinimumOrderRejected, 'checkout below the configured minimum is rejected server-side');
+
+  const paymentReset = await websiteSettingsService.updateSettings(
+    admin._id.toString(),
+    admin.email!,
+    {
+      paymentSettings: {
+        minPlanPriceCents: 20,
+        paymentSupportEnabled: true,
+        paymentSupportTelegram: 'https://t.me/phase14_support'
+      }
+    } as any,
+    'Restore default payment minimum after verification'
+  );
+  assert(paymentReset.paymentSettings.minPlanPriceCents === 20, 'minimum $0.20 can be restored');
+
+  const lowPlan = await subscriptionService.createPlan(
+    {
+      id: 'PLAN_PHASE14_MINIMUM',
+      name: '20 Cent Minimum Plan',
+      description: 'Valid minimum plan',
+      priceCents: 20,
+      durationUnit: 'DAYS',
+      durationValue: 1,
+      features: []
+    },
+    admin._id.toString()
+  );
+  assert(lowPlan.priceCents === 20, '$0.20 plan is allowed at the default minimum');
+
+  const allowedOrder = await paymentService.createPurchaseOrder(member._id.toString(), 'PLAN_15_DAYS', 'TRX');
+  assert(Boolean(allowedOrder.orderId), 'checkout succeeds after the minimum is restored');
+
   console.log('\n=============================================');
   console.log(`  PHASE 14 RESULTS: ${passedTests} PASSED, ${failedTests} FAILED`);
   console.log('=============================================\n');
@@ -280,6 +373,6 @@ async function run() {
 run().catch(async (error) => {
   console.error('Phase 14 suite crashed:', error);
   await mongoose.disconnect().catch(() => null);
-  await mongod.stop().catch(() => null);
+  await mongod?.stop().catch(() => null);
   process.exit(1);
 });

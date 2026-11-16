@@ -91,6 +91,11 @@ export interface IWebsiteSettings extends Document {
     description: string;
     buttonText: string;
   };
+  paymentSettings: {
+    minPlanPriceCents: number;
+    paymentSupportEnabled: boolean;
+    paymentSupportTelegram: string;
+  };
   footerContent: {
     copyrightText: string;
     disclaimerText: string;
@@ -165,6 +170,11 @@ const WebsiteSettingsSchema = new Schema<IWebsiteSettings>(
         maxlength: 600
       },
       buttonText: { type: String, default: 'Join Our Telegram Community', trim: true, maxlength: 60 }
+    },
+    paymentSettings: {
+      minPlanPriceCents: { type: Number, default: 20, min: 20, max: 10_000_000 },
+      paymentSupportEnabled: { type: Boolean, default: true },
+      paymentSupportTelegram: { type: String, default: '', trim: true, maxlength: 300 }
     },
     footerContent: {
       copyrightText: { type: String, default: '© 2026 Roulette Accuracy. All rights reserved.' },
