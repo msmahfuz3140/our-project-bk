@@ -51,6 +51,7 @@ export interface IPayment extends Document {
   failureReason?: string;
   payAddress?: string;
   checkoutUrl?: string;
+  network?: string;
 
   // Verification / lifecycle evidence
   signatureVerified: boolean;
@@ -198,6 +199,9 @@ const PaymentSchema = new Schema<IPayment>({
     type: String
   },
   checkoutUrl: {
+    type: String
+  },
+  network: {
     type: String
   },
   signatureVerified: {

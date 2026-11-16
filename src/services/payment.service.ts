@@ -29,6 +29,7 @@ import { UserRole } from '../shared/roles';
 export interface CreateOrderResult {
   orderId: string;
   paymentId: string;
+  providerPaymentId?: string;
   providerInvoiceId?: string;
   planId: string;
   planName: string;
@@ -39,8 +40,10 @@ export interface CreateOrderResult {
   payAddress?: string;
   payAmount?: number;
   payCurrency: string;
+  network?: string;
   paymentMode: 'LIVE' | 'SANDBOX' | 'SIMULATION';
   simulated: boolean;
+  expiresAt?: string;
   createdAt: string;
 }
 
@@ -152,8 +155,10 @@ export class PaymentService {
     let checkoutUrl = pendingUrl;
     let paymentId = `NP_PENDING_${Date.now()}_${generateRandomString(8).toUpperCase()}`;
     let providerInvoiceId: string | undefined;
+    let providerPaymentId: string | undefined;
     let payAddress: string | undefined;
     let payAmount: number | undefined;
+    let network: string | undefined;
     let invoicePayCurrency = normalizedPayCurrency;
     let paymentMode: CreateOrderResult['paymentMode'] = 'SIMULATION';
     let simulated = false;
@@ -172,42 +177,97 @@ export class PaymentService {
       // a valid HMAC-signed IPN plus all server-side validation is still required.
       simulated = true;
       paymentMode = 'SIMULATION';
+      payAddress = 'TSimulatedTetherDepositAddressForTest12345';
+      payAmount = plan.priceUsd;
+      network = 'trx';
       logger.warn('NOWPayments API key is not configured. Creating a development-only simulated order.', {
         orderId
       });
     } else {
       try {
-        const invoice = await nowPaymentsService.createInvoice({
-          priceAmount: plan.priceUsd,
-          priceCurrency: 'USD',
-          orderId,
-          orderDescription: `Roulette Accuracy — ${plan.name} (${plan.durationDays} Days Access)`,
-          ipnCallbackUrl: env.PAYMENT_IPN_CALLBACK_URL,
-          successUrl,
-          cancelUrl,
-          partiallyPaidUrl: pendingUrl
-        });
+        let npPayment: any = null;
+        let invoice: any = null;
+        let lastError: any = null;
 
-        const invoiceUrl = invoice?.invoice_url || invoice?.invoiceUrl;
-        if (!invoiceUrl || typeof invoiceUrl !== 'string') {
-          throw new NowPaymentsApiError(502, 'NOWPayments did not return a hosted invoice URL');
+        // 1. Direct crypto payment creation for in-app modal deposit & QR code
+        try {
+          npPayment = await nowPaymentsService.createPayment({
+            priceAmount: plan.priceUsd,
+            priceCurrency: 'USD',
+            payCurrency: normalizedPayCurrency.toLowerCase(),
+            ipnCallbackUrl: env.PAYMENT_IPN_CALLBACK_URL,
+            orderId,
+            orderDescription: `Roulette Accuracy — ${plan.name} (${plan.durationDays} Days Access)`
+          });
+        } catch (paymentErr: any) {
+          lastError = paymentErr;
+          logger.warn('Direct NOWPayments createPayment failed, attempting hosted invoice fallback', {
+            orderId,
+            statusCode: paymentErr?.statusCode,
+            message: paymentErr?.message
+          });
         }
 
-        checkoutUrl = invoiceUrl;
-        providerInvoiceId = invoice?.id !== undefined ? String(invoice.id) : undefined;
-        paymentId = providerInvoiceId || paymentId;
-        payAddress = typeof invoice?.pay_address === 'string' ? invoice.pay_address : undefined;
-        payAmount = asFiniteNumber(invoice?.pay_amount);
-        invoicePayCurrency = String(invoice?.pay_currency || normalizedPayCurrency).toUpperCase();
+        // 2. Also create hosted invoice as alternative checkoutUrl option
+        try {
+          invoice = await nowPaymentsService.createInvoice({
+            priceAmount: plan.priceUsd,
+            priceCurrency: 'USD',
+            orderId,
+            orderDescription: `Roulette Accuracy — ${plan.name} (${plan.durationDays} Days Access)`,
+            ipnCallbackUrl: env.PAYMENT_IPN_CALLBACK_URL,
+            successUrl,
+            cancelUrl,
+            partiallyPaidUrl: pendingUrl
+          });
+        } catch (invoiceErr: any) {
+          if (!lastError) lastError = invoiceErr;
+          logger.warn('NOWPayments createInvoice fallback encountered error', {
+            orderId,
+            statusCode: invoiceErr?.statusCode,
+            message: invoiceErr?.message
+          });
+        }
 
-        const expiryCandidate = invoice?.expiration_estimate_date || invoice?.expires_at;
-        if (expiryCandidate && !Number.isNaN(new Date(expiryCandidate).getTime())) {
-          expiresAt = new Date(expiryCandidate);
+        if (!npPayment && !invoice) {
+          throw lastError || new NowPaymentsApiError(502, 'NOWPayments was unable to initialize payment');
+        }
+
+        if (invoice) {
+          const invoiceUrl = invoice?.invoice_url || invoice?.invoiceUrl;
+          if (invoiceUrl && typeof invoiceUrl === 'string') {
+            checkoutUrl = invoiceUrl;
+          }
+          providerInvoiceId = invoice?.id !== undefined ? String(invoice.id) : undefined;
+        }
+
+        if (npPayment) {
+          providerPaymentId = String(npPayment.payment_id || '');
+          paymentId = providerPaymentId || providerInvoiceId || paymentId;
+          payAddress = typeof npPayment.pay_address === 'string' ? npPayment.pay_address : undefined;
+          payAmount = asFiniteNumber(npPayment.pay_amount);
+          invoicePayCurrency = String(npPayment.pay_currency || normalizedPayCurrency).toUpperCase();
+          network = typeof npPayment.network === 'string' ? npPayment.network : undefined;
+
+          const expiryCandidate = npPayment.expiration_estimate_date || npPayment.valid_until;
+          if (expiryCandidate && !Number.isNaN(new Date(expiryCandidate).getTime())) {
+            expiresAt = new Date(expiryCandidate);
+          }
+        } else if (invoice) {
+          paymentId = providerInvoiceId || paymentId;
+          payAddress = typeof invoice?.pay_address === 'string' ? invoice.pay_address : undefined;
+          payAmount = asFiniteNumber(invoice?.pay_amount);
+          invoicePayCurrency = String(invoice?.pay_currency || normalizedPayCurrency).toUpperCase();
+
+          const expiryCandidate = invoice?.expiration_estimate_date || invoice?.expires_at;
+          if (expiryCandidate && !Number.isNaN(new Date(expiryCandidate).getTime())) {
+            expiresAt = new Date(expiryCandidate);
+          }
         }
 
         paymentMode = env.NOWPAYMENTS_ENV === 'sandbox' ? 'SANDBOX' : 'LIVE';
       } catch (error: any) {
-        logger.error('Failed to create NOWPayments invoice', {
+        logger.error('Failed to create NOWPayments payment/invoice', {
           orderId,
           statusCode: error?.statusCode,
           message: error?.message
@@ -219,6 +279,9 @@ export class PaymentService {
         if (!isProduction && [401, 403].includes(Number(error?.statusCode))) {
           simulated = true;
           paymentMode = 'SIMULATION';
+          payAddress = 'TSimulatedTetherDepositAddressForTest12345';
+          payAmount = plan.priceUsd;
+          network = 'trx';
           logger.warn('NOWPayments rejected the configured API key. Using development-only simulated checkout.', {
             orderId
           });
@@ -270,6 +333,8 @@ export class PaymentService {
       orderId,
       provider: 'NOWPAYMENTS',
       providerInvoiceId,
+      providerPaymentId,
+      network,
       providerStatus: simulated ? 'simulation' : 'waiting',
       status: PaymentStatus.WAITING,
       isFulfilled: false,
@@ -302,6 +367,7 @@ export class PaymentService {
       orderId: payment.orderId,
       paymentId: payment.paymentId,
       providerInvoiceId: payment.providerInvoiceId,
+      providerPaymentId: payment.providerPaymentId,
       planId: payment.planId,
       planName: payment.planName,
       priceUsd: payment.priceAmount,
@@ -311,6 +377,8 @@ export class PaymentService {
       payAddress: payment.payAddress,
       payAmount: payment.payAmount,
       payCurrency: payment.payCurrency,
+      network: payment.network,
+      expiresAt: payment.expiresAt ? payment.expiresAt.toISOString() : undefined,
       paymentMode,
       simulated,
       createdAt: payment.createdAt.toISOString()
@@ -1376,7 +1444,46 @@ export class PaymentService {
    * Safe payment response for the authenticated checkout UI.
    */
   async getPaymentDetails(identifier: string, userId: string, isSuperAdmin: boolean): Promise<any> {
-    const order = await this.getOrderByIdentifier(identifier, userId, isSuperAdmin);
+    let order = await this.getOrderByIdentifier(identifier, userId, isSuperAdmin);
+
+    // Live provider sync: if order is still waiting/processing and has a providerPaymentId,
+    // poll NOWPayments to detect finished/confirmed deposits immediately.
+    if (
+      order.providerPaymentId &&
+      [PaymentStatus.WAITING, PaymentStatus.CONFIRMING, PaymentStatus.SENDING, PaymentStatus.PARTIALLY_PAID].includes(order.status) &&
+      nowPaymentsService.isConfigured
+    ) {
+      try {
+        const npStatus = await nowPaymentsService.getPayment(order.providerPaymentId);
+        if (npStatus && npStatus.payment_status) {
+          const remoteStatus = String(npStatus.payment_status).toLowerCase().trim();
+          if (remoteStatus !== (order.providerStatus || '').toLowerCase()) {
+            if (['finished', 'confirmed', 'sending'].includes(remoteStatus)) {
+              const syntheticSignature = nowPaymentsService.generateIpnSignature(
+                npStatus,
+                env.NOWPAYMENTS_IPN_SECRET
+              );
+              await this.processIpnCallback(npStatus, syntheticSignature).catch((err: any) => {
+                logger.warn('Inline verification on live poll caught error:', { err: err?.message });
+              });
+              const refreshed = await PaymentModel.findById(order._id);
+              if (refreshed) order = refreshed;
+            } else {
+              order.providerStatus = remoteStatus;
+              if (npStatus.actually_paid) {
+                order.actuallyPaid = asFiniteNumber(npStatus.actually_paid);
+              }
+              await order.save().catch(() => {});
+            }
+          }
+        }
+      } catch (pollErr: any) {
+        logger.debug('Polling NOWPayments for payment details caught non-fatal error', {
+          err: pollErr?.message
+        });
+      }
+    }
+
     let subscription: any = null;
 
     if (order.subscriptionId) {
@@ -1416,6 +1523,9 @@ export class PaymentService {
       actuallyPaid: order.actuallyPaid,
       payAmount: order.payAmount,
       payCurrency: order.payCurrency,
+      payAddress: order.payAddress,
+      network: order.network,
+      expiresAt: order.expiresAt ? order.expiresAt.toISOString() : undefined,
       paymentMethod: order.paymentMethod,
       transactionId: order.transactionId,
       checkoutUrl: order.checkoutUrl,
