@@ -76,7 +76,29 @@ export class AdminController {
   async updateUserProfile(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { userId } = req.params;
-      const { name, phone, password, isEmailVerified, isPhoneVerified, role, moderatorCommissionRate, moderatorNotes, isActive, reason } = req.body;
+      const {
+        name,
+        phone,
+        password,
+        confirmPassword,
+        mustChangePassword,
+        isEmailVerified,
+        isPhoneVerified,
+        role,
+        moderatorCommissionRate,
+        moderatorNotes,
+        isActive,
+        reason
+      } = req.body;
+
+      if (password !== undefined && password !== null && String(password).length > 0) {
+        if (String(password).length < 8) {
+          throw ApiError.badRequest('Password must be at least 8 characters long');
+        }
+        if (confirmPassword !== undefined && String(password) !== String(confirmPassword)) {
+          throw ApiError.badRequest('Password and confirmation password do not match');
+        }
+      }
 
       const auditReason = (reason && reason.trim().length >= 3) ? reason.trim() : 'Administrative profile or password modification';
 
@@ -84,12 +106,26 @@ export class AdminController {
         req.user!.id,
         req.user?.email || 'admin@rouletteaccuracy.com',
         userId as string,
-        { name, phone, password, isEmailVerified, isPhoneVerified, role, moderatorCommissionRate, moderatorNotes, isActive },
+        {
+          name,
+          phone,
+          password,
+          mustChangePassword: mustChangePassword === true,
+          isEmailVerified,
+          isPhoneVerified,
+          role,
+          moderatorCommissionRate,
+          moderatorNotes,
+          isActive
+        },
         auditReason
       );
 
       res.status(200).json({
         success: true,
+        message: updated.passwordChanged
+          ? 'Password updated successfully. The user must use the new password on their next login.'
+          : 'User profile updated successfully',
         data: updated
       });
     } catch (error) {

@@ -65,6 +65,14 @@ export interface IPayment extends Document {
   webhookEventCount: number;
   lastWebhookAt?: Date;
 
+  // Manual admin review / activation provenance
+  activationSource?: 'IPN' | 'MANUAL' | 'SYSTEM';
+  manualReviewStatus?: 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED';
+  reviewedByAdminId?: mongoose.Types.ObjectId;
+  reviewedByAdminEmail?: string;
+  reviewedAt?: Date;
+  reviewReason?: string;
+
   referredByModeratorId?: mongoose.Types.ObjectId;
   referralCodeSnapshot?: string;
   commissionRateSnapshot?: number;
@@ -240,6 +248,32 @@ const PaymentSchema = new Schema<IPayment>({
   },
   lastWebhookAt: {
     type: Date
+  },
+  activationSource: {
+    type: String,
+    enum: ['IPN', 'MANUAL', 'SYSTEM'],
+    index: true
+  },
+  manualReviewStatus: {
+    type: String,
+    enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'],
+    default: 'NONE',
+    index: true
+  },
+  reviewedByAdminId: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    index: true
+  },
+  reviewedByAdminEmail: {
+    type: String
+  },
+  reviewedAt: {
+    type: Date
+  },
+  reviewReason: {
+    type: String,
+    maxlength: 1000
   },
   referredByModeratorId: {
     type: Schema.Types.ObjectId,

@@ -502,6 +502,8 @@ export class AuthService {
     }
 
     user.passwordHash = await hashPassword(newPassword);
+    user.mustChangePassword = false;
+    user.passwordChangedAt = new Date();
     user.sessionsRevokedAt = new Date();
     await user.save();
 
@@ -529,7 +531,12 @@ export class AuthService {
     }
 
     user.passwordHash = await hashPassword(input.newPassword);
+    user.mustChangePassword = false;
+    user.passwordChangedAt = new Date();
     await user.save();
+
+    memoryCache.del(cacheKeys.authContext(user._id.toString()));
+    memoryCache.del(cacheKeys.userDashboard(user._id.toString()));
 
     await this.logSecurityEvent({
       userId: user._id,
@@ -591,6 +598,8 @@ export class AuthService {
       isEmailVerified: user.isEmailVerified,
       isPhoneVerified: user.isPhoneVerified,
       isActive: user.isActive,
+      mustChangePassword: Boolean(user.mustChangePassword),
+      passwordChangedAt: user.passwordChangedAt ? new Date(user.passwordChangedAt).toISOString() : undefined,
       referralCode: user.referralCode,
       hasActiveSubscription: hasActiveSub || user.role === UserRole.SUPER_ADMIN || user.role === UserRole.MODERATOR,
       createdAt: user.createdAt.toISOString()

@@ -51,7 +51,7 @@ export async function requireAuth(
       async () => {
         const [user, activeSub] = await Promise.all([
           UserModel.findById(decoded.userId)
-            .select('name email phone role isEmailVerified isPhoneVerified isActive accountStatus suspendedUntil isDeleted sessionsRevokedAt referralCode createdAt')
+            .select('name email phone role isEmailVerified isPhoneVerified isActive accountStatus suspendedUntil isDeleted sessionsRevokedAt referralCode createdAt mustChangePassword passwordChangedAt')
             .lean(),
           SubscriptionModel.findOne({
             userId: decoded.userId,
@@ -102,6 +102,8 @@ export async function requireAuth(
       isEmailVerified: user.isEmailVerified,
       isPhoneVerified: user.isPhoneVerified,
       isActive: user.isActive,
+      mustChangePassword: Boolean(user.mustChangePassword),
+      passwordChangedAt: user.passwordChangedAt ? new Date(user.passwordChangedAt).toISOString() : undefined,
       referralCode: user.referralCode,
       hasActiveSubscription: !!activeSub || user.role === UserRole.SUPER_ADMIN || user.role === UserRole.MODERATOR,
       subscriptionPlanId: activeSub?.planId,

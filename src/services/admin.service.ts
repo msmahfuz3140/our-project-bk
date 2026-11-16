@@ -488,6 +488,7 @@ export class AdminService {
       name?: string;
       phone?: string;
       password?: string;
+      mustChangePassword?: boolean;
       isEmailVerified?: boolean;
       isPhoneVerified?: boolean;
       role?: UserRole;
@@ -496,7 +497,7 @@ export class AdminService {
       isActive?: boolean;
     },
     reason: string
-  ): Promise<IUser> {
+  ): Promise<Record<string, any>> {
     const user = await UserModel.findById(userId);
     if (!user) {
       throw ApiError.notFound(`User ${userId} does not exist`);
@@ -509,15 +510,31 @@ export class AdminService {
       isPhoneVerified: user.isPhoneVerified,
       role: user.role,
       moderatorCommissionRate: user.moderatorCommissionRate,
-      isActive: user.isActive
+      isActive: user.isActive,
+      passwordChangedAt: user.passwordChangedAt?.toISOString()
     };
 
+    let passwordChanged = false;
     if (input.name) user.name = input.name.trim();
     if (input.phone !== undefined) user.phone = input.phone.trim() || undefined;
-    if (input.password && input.password.trim().length >= 8) {
-      const cleanPass = input.password.trim();
-      user.passwordHash = await hashPassword(cleanPass);
+    if (input.password !== undefined && input.password !== null && String(input.password).length > 0) {
+      const rawPassword = String(input.password);
+      if (rawPassword.length < 8) {
+        throw ApiError.badRequest('Password must be at least 8 characters long');
+      }
+      if (rawPassword.length > 128) {
+        throw ApiError.badRequest('Password must not exceed 128 characters');
+      }
+
+      // Passwords are always stored as bcrypt hashes. The plaintext value is
+      // never persisted, logged, or returned by any API response.
+      user.passwordHash = await hashPassword(rawPassword);
+      user.mustChangePassword = input.mustChangePassword === true;
+      user.passwordChangedAt = new Date();
+      user.passwordUpdatedByAdminEmail = adminEmail;
+      // Invalidate all existing sessions so the new password is authoritative.
       user.sessionsRevokedAt = new Date();
+      passwordChanged = true;
     }
     if (input.isEmailVerified !== undefined) user.isEmailVerified = input.isEmailVerified;
     if (input.isPhoneVerified !== undefined) user.isPhoneVerified = input.isPhoneVerified;
@@ -557,11 +574,37 @@ export class AdminService {
         isPhoneVerified: user.isPhoneVerified,
         role: user.role,
         moderatorCommissionRate: user.moderatorCommissionRate,
-        isActive: user.isActive
+        isActive: user.isActive,
+        mustChangePassword: user.mustChangePassword,
+        passwordChangedAt: user.passwordChangedAt?.toISOString()
       }
     });
 
-    return user;
+    if (passwordChanged) {
+      await this.logAction({
+        action: 'USER_PASSWORD_RESET',
+        adminId,
+        adminEmail,
+        targetUserId: user._id.toString(),
+        targetUserEmail: user.email,
+        reason,
+        previousValue: { passwordChangedAt: previousValue.passwordChangedAt },
+        newValue: {
+          passwordChangedAt: user.passwordChangedAt?.toISOString(),
+          mustChangePassword: user.mustChangePassword,
+          sessionsRevoked: true,
+          hashing: 'bcrypt'
+        }
+      });
+    }
+
+    const sanitized = user.toObject() as Record<string, any>;
+    delete sanitized.passwordHash;
+    delete sanitized.twoFactorSecret;
+    sanitized.id = user._id.toString();
+    sanitized._id = user._id.toString();
+    sanitized.passwordChanged = passwordChanged;
+    return sanitized;
   }
 
   /**

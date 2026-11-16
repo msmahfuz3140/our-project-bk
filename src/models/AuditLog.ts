@@ -31,6 +31,9 @@ export type AuditActionType =
   | 'BROADCAST_ANNOUNCEMENT'
   | 'FINANCIAL_PAYOUT'
   | 'CONTACT_MESSAGE_STATUS'
+  | 'PAYMENT_MANUAL_APPROVE'
+  | 'PAYMENT_MANUAL_REJECT'
+  | 'USER_PASSWORD_RESET'
   | 'MAIN_ADMIN_BOOTSTRAP';
 
 export interface IAuditLog extends Document {

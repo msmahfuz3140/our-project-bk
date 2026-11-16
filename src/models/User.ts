@@ -13,6 +13,9 @@ export interface IUser extends Document {
   email?: string;
   phone?: string;
   passwordHash: string;
+  mustChangePassword: boolean;
+  passwordChangedAt?: Date;
+  passwordUpdatedByAdminEmail?: string;
   role: UserRole;
   isEmailVerified: boolean;
   isPhoneVerified: boolean;
@@ -66,6 +69,17 @@ const UserSchema = new Schema<IUser>({
   passwordHash: {
     type: String,
     required: true
+  },
+  mustChangePassword: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  passwordChangedAt: {
+    type: Date
+  },
+  passwordUpdatedByAdminEmail: {
+    type: String
   },
   role: {
     type: String,

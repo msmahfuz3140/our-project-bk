@@ -7,6 +7,7 @@ import { UserModel, AccountStatus } from '../models/User';
 import { FinancialLedgerModel } from '../models/FinancialLedger';
 import { ReferralCommissionModel } from '../models/ReferralCommission';
 import { CommissionPolicyModel } from '../models/CommissionPolicy';
+import { AuditLogModel } from '../models/AuditLog';
 import { subscriptionService } from './subscription.service';
 import { nowPaymentsService, NowPaymentsApiError } from './nowpayments.service';
 import { notificationService } from './notification.service';
@@ -1089,59 +1090,148 @@ export class PaymentService {
     payment.verified = true;
     payment.providerStatus = 'finished';
 
-    // ---------------------------------------------------------------------
-    // 8. Atomic claim — only one worker may activate Premium
-    // ---------------------------------------------------------------------
-    const now = new Date();
-    const staleBefore = new Date(now.getTime() - PROCESSING_LOCK_MS);
+    let fulfillResult;
+    try {
+      fulfillResult = await this.fulfillVerifiedPayment({
+        payment,
+        providerPaymentId,
+        providerVerified,
+        signatureVerified: true,
+        source: 'IPN',
+        payload: payload as Record<string, unknown>
+      });
+    } catch (error) {
+      await finishEvent('FAILED', error instanceof Error ? error.message : 'Unknown activation error');
+      throw error;
+    }
 
-    const claimedPayment = await PaymentModel.findOneAndUpdate(
-      {
-        _id: payment._id,
-        isFulfilled: false,
-        status: { $ne: PaymentStatus.REFUNDED },
-        $or: [
-          { fulfillmentStatus: { $ne: 'PROCESSING' } },
-          { processingStartedAt: { $lt: staleBefore } }
-        ]
-      },
-      {
-        $set: {
-          fulfillmentStatus: 'PROCESSING',
-          processingStartedAt: now,
-          lastWebhookAt: now,
-          providerStatus: 'finished',
-          verified: true,
-          signatureVerified: true,
-          providerVerified,
-          verifiedAt: payment.verifiedAt || now
-        },
-        $inc: { webhookEventCount: 1 }
-      },
-      { new: true }
-    );
+    if (fulfillResult.outcome === 'REFUNDED') {
+      await finishEvent('IGNORED', 'Refund arrived during activation; subscription revoked');
+      return {
+        success: false,
+        orderId: payment.orderId,
+        paymentId: payment.paymentId,
+        providerPaymentId,
+        eventId,
+        status: PaymentStatus.REFUNDED,
+        isFulfilled: true,
+        providerVerified,
+        subscriptionId: fulfillResult.subscriptionId,
+        message: 'Payment was refunded before activation completed; Premium remains revoked'
+      };
+    }
 
-    if (!claimedPayment) {
-      const current = await PaymentModel.findById(payment._id);
-      await finishEvent('DUPLICATE', 'Another worker holds the activation lock');
+    if (fulfillResult.outcome !== 'FULFILLED') {
+      await finishEvent('DUPLICATE', 'Payment was already processed or is currently locked');
       return {
         success: true,
         orderId: payment.orderId,
         paymentId: payment.paymentId,
         providerPaymentId,
         eventId,
-        status: current?.status || PaymentStatus.FINISHED,
-        isFulfilled: Boolean(current?.isFulfilled),
+        status: fulfillResult.status,
+        isFulfilled: fulfillResult.isFulfilled,
         duplicate: true,
         providerVerified,
-        subscriptionId: current?.subscriptionId?.toString(),
+        subscriptionId: fulfillResult.subscriptionId,
         message: 'Payment is already being processed or fulfilled'
       };
     }
 
+    await finishEvent('PROCESSED');
+
+    return {
+      success: true,
+      orderId: payment.orderId,
+      paymentId: payment.paymentId,
+      providerPaymentId,
+      eventId,
+      status: PaymentStatus.FINISHED,
+      isFulfilled: true,
+      providerVerified,
+      subscriptionId: fulfillResult.subscriptionId,
+      message: 'Payment verified and subscription activated'
+    };
+  }
+  /**
+   * Shared, idempotent fulfillment path used by both the signed IPN webhook and
+   * authorized manual approval. Manual approval may only reach this method after
+   * the provider has been independently verified.
+   */
+  private async fulfillVerifiedPayment(input: {
+    payment: IPayment;
+    providerPaymentId: string;
+    providerVerified: boolean;
+    signatureVerified: boolean;
+    source: 'IPN' | 'MANUAL';
+    payload?: Record<string, unknown>;
+    adminId?: string;
+    adminEmail?: string;
+    reason?: string;
+  }): Promise<{
+    outcome: 'FULFILLED' | 'DUPLICATE' | 'PROCESSING' | 'REFUNDED';
+    subscriptionId?: string;
+    status: PaymentStatus;
+    isFulfilled: boolean;
+  }> {
+    const payment = input.payment;
+    const now = new Date();
+    const staleBefore = new Date(now.getTime() - PROCESSING_LOCK_MS);
+
+    const claimUpdate: Record<string, any> = {
+      $set: {
+        fulfillmentStatus: 'PROCESSING',
+        processingStartedAt: now,
+        providerStatus: 'finished',
+        provider: 'NOWPAYMENTS',
+        providerPaymentId: input.providerPaymentId,
+        verified: true,
+        signatureVerified: input.signatureVerified,
+        providerVerified: input.providerVerified,
+        verifiedAt: payment.verifiedAt || now,
+        activationSource: input.source,
+        ...(input.source === 'IPN' ? { lastWebhookAt: now } : {}),
+        ...(input.source === 'MANUAL'
+          ? {
+              manualReviewStatus: 'APPROVED',
+              reviewedByAdminId: input.adminId,
+              reviewedByAdminEmail: input.adminEmail,
+              reviewedAt: now,
+              reviewReason: input.reason
+            }
+          : {})
+      }
+    };
+    if (input.source === 'IPN') {
+      claimUpdate.$inc = { webhookEventCount: 1 };
+    }
+
+    const claimedPayment = await PaymentModel.findOneAndUpdate(
+      {
+        _id: payment._id,
+        isFulfilled: false,
+        status: { $nin: [PaymentStatus.REFUNDED, PaymentStatus.REJECTED] },
+        $or: [
+          { fulfillmentStatus: { $ne: 'PROCESSING' } },
+          { processingStartedAt: { $lt: staleBefore } }
+        ]
+      },
+      claimUpdate,
+      { new: true }
+    );
+
+    if (!claimedPayment) {
+      const current = await PaymentModel.findById(payment._id);
+      return {
+        outcome: current?.isFulfilled ? 'DUPLICATE' : 'PROCESSING',
+        subscriptionId: current?.subscriptionId?.toString(),
+        status: current?.status || PaymentStatus.FINISHED,
+        isFulfilled: Boolean(current?.isFulfilled)
+      };
+    }
+
     try {
-      // Crash recovery: if a subscription was already created for this payment,
-      // never create a second one or extend a second time.
+      // Crash recovery: reuse an existing subscription for this payment.
       let subscription = await SubscriptionModel.findOne({ paymentId: claimedPayment._id });
 
       if (!subscription) {
@@ -1152,8 +1242,6 @@ export class PaymentService {
           endDate: { $gt: now }
         }).sort({ endDate: -1 });
 
-        // The new pass is visible immediately, but its expiry is calculated
-        // from the existing paid-through date so no days are lost.
         const subscriptionStartDate = now;
         const subscriptionEndDate = calculatePlanExpiration(
           existingActiveSub ? existingActiveSub.endDate : now,
@@ -1169,7 +1257,7 @@ export class PaymentService {
           endDate: subscriptionEndDate,
           paymentId: claimedPayment._id,
           provider: 'NOWPAYMENTS',
-          providerPaymentId,
+          providerPaymentId: input.providerPaymentId,
           autoRenew: false,
           isManualGrant: false,
           isApprovedByAdmin: true,
@@ -1181,57 +1269,65 @@ export class PaymentService {
         logger.info('Subscription activated from verified NOWPayments payment', {
           orderId: claimedPayment.orderId,
           subscriptionId: subscription._id.toString(),
+          source: input.source,
           startDate: subscriptionStartDate.toISOString(),
           endDate: subscriptionEndDate.toISOString()
         });
       }
 
+      const paymentUpdate: Record<string, any> = {
+        status: PaymentStatus.FINISHED,
+        isFulfilled: true,
+        fulfillmentStatus: 'FULFILLED',
+        subscriptionId: subscription._id,
+        paidAt: now,
+        verified: true,
+        signatureVerified: input.signatureVerified,
+        providerVerified: input.providerVerified,
+        verifiedAt: payment.verifiedAt || now,
+        providerStatus: 'finished',
+        actuallyPaid: payment.actuallyPaid,
+        payAmount: payment.payAmount,
+        payCurrency: payment.payCurrency,
+        payAddress: payment.payAddress,
+        paymentMethod: payment.paymentMethod,
+        providerPaymentId: input.providerPaymentId,
+        providerInvoiceId: payment.providerInvoiceId,
+        transactionId: payment.transactionId,
+        overpaymentAmount: payment.overpaymentAmount,
+        activationSource: input.source,
+        ...(input.source === 'MANUAL'
+          ? {
+              manualReviewStatus: 'APPROVED',
+              reviewedByAdminId: input.adminId,
+              reviewedByAdminEmail: input.adminEmail,
+              reviewedAt: now,
+              reviewReason: input.reason
+            }
+          : {}),
+        ...(input.payload ? { rawIpnData: input.payload } : {})
+      };
+
       await PaymentModel.updateOne(
         { _id: claimedPayment._id },
         {
-          $set: {
-            status: PaymentStatus.FINISHED,
-            isFulfilled: true,
-            fulfillmentStatus: 'FULFILLED',
-            subscriptionId: subscription._id,
-            paidAt: now,
-            verified: true,
-            signatureVerified: true,
-            providerVerified,
-            verifiedAt: payment.verifiedAt || now,
-            providerStatus: 'finished',
-            actuallyPaid: payment.actuallyPaid,
-            payAmount: payment.payAmount,
-            payCurrency: payment.payCurrency,
-            transactionId: payment.transactionId,
-            overpaymentAmount: payment.overpaymentAmount,
-            rawIpnData: payload
-          },
-          $inc: { webhookEventCount: 1 }
+          $set: paymentUpdate,
+          ...(input.source === 'IPN' ? { $inc: { webhookEventCount: 1 } } : {})
         }
       );
 
-      // A refund event may race the finished event on separate serverless
-      // instances. Re-read the authoritative status before granting anything.
+      // A refund may race activation on another serverless instance.
       const latestPayment = await PaymentModel.findById(claimedPayment._id);
       if (latestPayment?.status === PaymentStatus.REFUNDED) {
-        await this.processRefund(latestPayment, providerPaymentId);
-        await finishEvent('IGNORED', 'Refund arrived during activation; subscription revoked');
+        await this.processRefund(latestPayment, input.providerPaymentId);
         return {
-          success: false,
-          orderId: payment.orderId,
-          paymentId: payment.paymentId,
-          providerPaymentId,
-          eventId,
-          status: PaymentStatus.REFUNDED,
-          isFulfilled: true,
-          providerVerified,
+          outcome: 'REFUNDED',
           subscriptionId: subscription._id.toString(),
-          message: 'Payment was refunded before activation completed; Premium remains revoked'
+          status: PaymentStatus.REFUNDED,
+          isFulfilled: true
         };
       }
 
-      // Immutable ledger entry, idempotent by order + type.
       const existingLedger = await FinancialLedgerModel.findOne({
         orderId: claimedPayment.orderId,
         type: 'SUBSCRIPTION_PURCHASE'
@@ -1240,17 +1336,20 @@ export class PaymentService {
         await FinancialLedgerModel.create({
           userId: claimedPayment.userId,
           orderId: claimedPayment.orderId,
-          paymentId: providerPaymentId,
+          paymentId: input.providerPaymentId,
           subscriptionId: subscription._id,
           planId: claimedPayment.planId,
           type: 'SUBSCRIPTION_PURCHASE',
           amountCents: claimedPayment.priceCents,
           amountUsd: claimedPayment.priceAmount,
-          payAmount: claimedPayment.payAmount,
-          actuallyPaid: claimedPayment.actuallyPaid,
-          payCurrency: claimedPayment.payCurrency,
+          payAmount: payment.payAmount,
+          actuallyPaid: payment.actuallyPaid,
+          payCurrency: payment.payCurrency,
           status: 'SETTLED',
-          notes: `Subscription payment independently verified via NOWPayments IPN + GET /payment (${receivedStatus})`
+          notes:
+            input.source === 'MANUAL'
+              ? `Subscription manually approved after NOWPayments provider verification by ${input.adminEmail || 'admin'}`
+              : 'Subscription payment independently verified via NOWPayments IPN + GET /payment (finished)'
         });
       }
 
@@ -1258,11 +1357,12 @@ export class PaymentService {
         claimedPayment.userId,
         'SUBSCRIPTION_ACTIVATED',
         'Payment Confirmed & Subscription Active',
-        `Your payment of $${claimedPayment.priceAmount} for ${claimedPayment.planName} has been fully settled on the blockchain. Prediction feeds are live!`,
+        input.source === 'MANUAL'
+          ? `Your payment of $${claimedPayment.priceAmount} for ${claimedPayment.planName} was verified and approved by administration. Premium access is now active.`
+          : `Your payment of $${claimedPayment.priceAmount} for ${claimedPayment.planName} has been fully settled on the blockchain. Prediction feeds are live!`,
         '/dashboard/tool'
       ).catch(() => null);
 
-      // Moderator referral commission attribution, idempotent by payment.
       const payingUser = await UserModel.findById(claimedPayment.userId);
       const targetModeratorId = claimedPayment.referredByModeratorId || payingUser?.referredBy;
 
@@ -1301,49 +1401,30 @@ export class PaymentService {
         }
       }
 
-      // Final race check: if a refund committed while the ledger/commission
-      // writes were in flight, reverse the just-created records.
       const finalPayment = await PaymentModel.findById(claimedPayment._id);
       if (finalPayment?.status === PaymentStatus.REFUNDED) {
-        await this.processRefund(finalPayment, providerPaymentId);
-        await finishEvent('IGNORED', 'Refund committed during activation finalization');
+        await this.processRefund(finalPayment, input.providerPaymentId);
         return {
-          success: false,
-          orderId: payment.orderId,
-          paymentId: payment.paymentId,
-          providerPaymentId,
-          eventId,
-          status: PaymentStatus.REFUNDED,
-          isFulfilled: true,
-          providerVerified,
+          outcome: 'REFUNDED',
           subscriptionId: subscription._id.toString(),
-          message: 'Payment was refunded during finalization; Premium revoked'
+          status: PaymentStatus.REFUNDED,
+          isFulfilled: true
         };
       }
 
-      await finishEvent('PROCESSED');
       invalidatePaymentCaches(claimedPayment.userId.toString());
 
       return {
-        success: true,
-        orderId: claimedPayment.orderId,
-        paymentId: claimedPayment.paymentId,
-        providerPaymentId,
-        eventId,
-        status: PaymentStatus.FINISHED,
-        isFulfilled: true,
-        providerVerified,
+        outcome: 'FULFILLED',
         subscriptionId: subscription._id.toString(),
-        message: 'Payment verified and subscription activated'
+        status: PaymentStatus.FINISHED,
+        isFulfilled: true
       };
     } catch (error) {
-      // Release the activation lock so a legitimate NOWPayments retry can
-      // safely re-run. Subscription creation is idempotent by paymentId.
       await PaymentModel.updateOne(
         { _id: claimedPayment._id, isFulfilled: false },
         { $set: { fulfillmentStatus: 'NONE' } }
       ).catch(() => null);
-      await finishEvent('FAILED', error instanceof Error ? error.message : 'Unknown activation error');
       throw error;
     }
   }
@@ -1625,6 +1706,267 @@ export class PaymentService {
   }
 
   /**
+   * Authorized manual approval of a payment that has not been fulfilled by IPN.
+   * The provider must independently report `finished`; a pending/unpaid payment
+   * can never be approved from frontend data alone.
+   */
+  async approvePaymentManually(
+    identifier: string,
+    adminId: string,
+    adminEmail: string,
+    reason: string
+  ): Promise<{ orderId: string; subscriptionId?: string; status: PaymentStatus }> {
+    if (!reason || reason.trim().length < 3) {
+      throw ApiError.badRequest('A clear approval reason is required');
+    }
+
+    const payment = await PaymentModel.findOne({
+      $or: [
+        { orderId: identifier },
+        { paymentId: identifier },
+        { providerPaymentId: identifier },
+        ...(mongoose.Types.ObjectId.isValid(identifier) ? [{ _id: identifier }] : [])
+      ]
+    });
+
+    if (!payment) {
+      throw ApiError.notFound('Payment record was not found');
+    }
+
+    if (payment.isFulfilled) {
+      throw ApiError.conflict('This payment has already been fulfilled. Duplicate activation is blocked.');
+    }
+
+    if ([PaymentStatus.REFUNDED, PaymentStatus.REJECTED].includes(payment.status)) {
+      throw ApiError.conflict(`Cannot approve a payment with status ${payment.status}`);
+    }
+
+    if (!payment.providerPaymentId) {
+      throw ApiError.conflict(
+        'No NOWPayments payment ID is stored for this order, so it cannot be independently verified.'
+      );
+    }
+
+    let providerVerified = false;
+    let providerPayment: any = null;
+
+    if (nowPaymentsService.isConfigured) {
+      try {
+        providerPayment = await nowPaymentsService.getPayment(payment.providerPaymentId);
+      } catch (error: any) {
+        const statusCode = error instanceof NowPaymentsApiError ? error.statusCode : 0;
+        if (statusCode === 404) {
+          throw ApiError.conflict('NOWPayments does not recognize this payment ID.');
+        }
+        throw new ApiError(
+          502,
+          'Unable to verify this payment with NOWPayments right now. Approval was not applied.',
+          'PAYMENT_PROVIDER_VERIFICATION_FAILED'
+        );
+      }
+
+      const providerStatus = String(providerPayment?.payment_status || '').toLowerCase();
+      if (providerStatus !== 'finished') {
+        throw ApiError.conflict(
+          `NOWPayments reports status "${providerStatus || 'unknown'}". Only a verified finished payment can be approved.`
+        );
+      }
+
+      if (String(providerPayment?.payment_id ?? '') !== payment.providerPaymentId) {
+        throw ApiError.conflict('Provider payment ID mismatch.');
+      }
+      if (String(providerPayment?.order_id ?? '') !== payment.orderId) {
+        throw ApiError.conflict('Provider order ID mismatch.');
+      }
+
+      const providerPrice = asFiniteNumber(providerPayment?.price_amount);
+      if (providerPrice === undefined || Math.abs(providerPrice - payment.priceAmount) > PRICE_TOLERANCE_USD) {
+        throw ApiError.conflict('Provider price amount does not match the stored order.');
+      }
+      if (
+        providerPayment?.price_currency &&
+        String(providerPayment.price_currency).toUpperCase() !== payment.priceCurrency.toUpperCase()
+      ) {
+        throw ApiError.conflict('Provider price currency does not match the stored order.');
+      }
+
+      const providerActuallyPaid = asFiniteNumber(providerPayment?.actually_paid);
+      const providerPayAmount = asFiniteNumber(providerPayment?.pay_amount);
+      const providerPayCurrency = providerPayment?.pay_currency
+        ? String(providerPayment.pay_currency).toUpperCase()
+        : undefined;
+
+      if (payment.payCurrencyLocked && providerPayCurrency && providerPayCurrency !== payment.payCurrency.toUpperCase()) {
+        throw ApiError.conflict('Provider pay currency does not match the stored order.');
+      }
+      if (!payment.payCurrencyLocked && providerPayCurrency) {
+        payment.payCurrency = providerPayCurrency;
+      }
+      if (providerActuallyPaid !== undefined) payment.actuallyPaid = providerActuallyPaid;
+      if (providerPayAmount !== undefined && payment.payAmount === undefined) payment.payAmount = providerPayAmount;
+      if (
+        payment.payAmount &&
+        payment.payAmount > 0 &&
+        payment.actuallyPaid !== undefined &&
+        payment.actuallyPaid < payment.payAmount * (1 - PAY_AMOUNT_TOLERANCE)
+      ) {
+        throw ApiError.conflict('Provider reports an underpaid amount. Approval was blocked.');
+      }
+
+      const txHash =
+        (typeof providerPayment?.payin_hash === 'string' && providerPayment.payin_hash) ||
+        (typeof providerPayment?.outcome_hash === 'string' && providerPayment.outcome_hash) ||
+        (typeof providerPayment?.burn_hash === 'string' && providerPayment.burn_hash) ||
+        undefined;
+      if (txHash) payment.transactionId = txHash;
+
+      providerVerified = true;
+      payment.providerVerified = true;
+      payment.verified = true;
+      payment.verifiedAt = new Date();
+      payment.providerStatus = 'finished';
+    } else if (
+      payment.providerVerified &&
+      payment.verified &&
+      payment.status === PaymentStatus.FINISHED
+    ) {
+      // Reliable stored evidence from an earlier server-side provider check.
+      providerVerified = true;
+    } else {
+      throw new ApiError(
+        503,
+        'NOWPayments verification is not configured on the server. Pending payments cannot be manually approved.',
+        'PAYMENT_PROVIDER_NOT_CONFIGURED'
+      );
+    }
+
+    await payment.save();
+
+    const result = await this.fulfillVerifiedPayment({
+      payment,
+      providerPaymentId: payment.providerPaymentId,
+      providerVerified,
+      signatureVerified: Boolean(payment.signatureVerified),
+      source: 'MANUAL',
+      adminId,
+      adminEmail,
+      reason: reason.trim()
+    });
+
+    if (result.outcome === 'REFUNDED') {
+      throw ApiError.conflict('This payment was refunded and cannot be approved.');
+    }
+    if (result.outcome !== 'FULFILLED') {
+      throw ApiError.conflict('Payment is already fulfilled or currently processing.');
+    }
+
+    const approvedUser = await UserModel.findOne({ _id: payment.userId })
+      .select('email')
+      .lean<{ email?: string } | null>();
+
+    await AuditLogModel.create({
+      action: 'PAYMENT_MANUAL_APPROVE',
+      adminId: new mongoose.Types.ObjectId(adminId),
+      adminEmail,
+      targetUserId: payment.userId,
+      targetUserEmail: approvedUser?.email,
+      targetResourceId: payment.orderId,
+      resourceType: 'Payment',
+      reason: reason.trim(),
+      previousValue: { status: payment.status, isFulfilled: payment.isFulfilled },
+      newValue: {
+        status: PaymentStatus.FINISHED,
+        isFulfilled: true,
+        subscriptionId: result.subscriptionId,
+        providerVerified: true
+      }
+    });
+
+    return {
+      orderId: payment.orderId,
+      subscriptionId: result.subscriptionId,
+      status: PaymentStatus.FINISHED
+    };
+  }
+
+  /**
+   * Reject a payment. Rejection never deletes records and never revokes an
+   * already fulfilled payment.
+   */
+  async rejectPaymentManually(
+    identifier: string,
+    adminId: string,
+    adminEmail: string,
+    reason: string
+  ): Promise<{ orderId: string; status: PaymentStatus }> {
+    if (!reason || reason.trim().length < 3) {
+      throw ApiError.badRequest('A clear rejection reason is required');
+    }
+
+    const payment = await PaymentModel.findOne({
+      $or: [
+        { orderId: identifier },
+        { paymentId: identifier },
+        { providerPaymentId: identifier },
+        ...(mongoose.Types.ObjectId.isValid(identifier) ? [{ _id: identifier }] : [])
+      ]
+    });
+
+    if (!payment) {
+      throw ApiError.notFound('Payment record was not found');
+    }
+
+    if (payment.isFulfilled) {
+      throw ApiError.conflict('A fulfilled payment cannot be rejected through this action.');
+    }
+    if (payment.status === PaymentStatus.REJECTED) {
+      throw ApiError.conflict('This payment has already been rejected.');
+    }
+    if (payment.status === PaymentStatus.REFUNDED) {
+      throw ApiError.conflict('This payment has already been refunded.');
+    }
+
+    const previousStatus = payment.status;
+    payment.status = PaymentStatus.REJECTED;
+    payment.manualReviewStatus = 'REJECTED';
+    payment.reviewedByAdminId = new mongoose.Types.ObjectId(adminId);
+    payment.reviewedByAdminEmail = adminEmail;
+    payment.reviewedAt = new Date();
+    payment.reviewReason = reason.trim();
+    payment.failureReason = `Manually rejected: ${reason.trim()}`;
+    await payment.save();
+
+    const rejectedUser = await UserModel.findOne({ _id: payment.userId })
+      .select('email')
+      .lean<{ email?: string } | null>();
+
+    await AuditLogModel.create({
+      action: 'PAYMENT_MANUAL_REJECT',
+      adminId: new mongoose.Types.ObjectId(adminId),
+      adminEmail,
+      targetUserId: payment.userId,
+      targetUserEmail: rejectedUser?.email,
+      targetResourceId: payment.orderId,
+      resourceType: 'Payment',
+      reason: reason.trim(),
+      previousValue: { status: previousStatus },
+      newValue: { status: PaymentStatus.REJECTED }
+    });
+
+    await notificationService.createNotification(
+      payment.userId,
+      'PAYMENT_FAILED',
+      'Payment Rejected',
+      `Your payment for order ${payment.orderId} was rejected by administration. Reason: ${reason.trim()}`,
+      '/plans'
+    ).catch(() => null);
+
+    invalidatePaymentCaches(payment.userId.toString());
+
+    return { orderId: payment.orderId, status: PaymentStatus.REJECTED };
+  }
+
+  /**
    * Admin Payment Management: view, search, and filter orders.
    */
   async getAdminOrders(filter: AdminPaymentFilterInput): Promise<{ orders: any[]; total: number; page: number; limit: number; totalPages: number }> {
@@ -1635,7 +1977,31 @@ export class PaymentService {
     const query: any = {};
 
     if (filter.status && (filter.status as string) !== 'ALL') {
-      query.status = filter.status;
+      if (filter.status === 'PENDING') {
+        query.$and = [
+          {
+            $or: [
+              {
+                status: {
+                  $in: [
+                    PaymentStatus.WAITING,
+                    PaymentStatus.CONFIRMING,
+                    PaymentStatus.CONFIRMED,
+                    PaymentStatus.SENDING,
+                    PaymentStatus.PARTIALLY_PAID,
+                    PaymentStatus.REVIEW_REQUIRED
+                  ]
+                }
+              },
+              // A finished payment that was never fulfilled is a stuck order and
+              // belongs in the manual review queue.
+              { status: PaymentStatus.FINISHED, isFulfilled: false }
+            ]
+          }
+        ];
+      } else {
+        query.status = filter.status;
+      }
     }
 
     if (filter.planId && filter.planId !== 'ALL') {
@@ -1740,6 +2106,7 @@ export class PaymentService {
       reviewRequiredOrders,
       refundedOrders,
       expiredOrders,
+      rejectedOrders,
       verifiedPayments,
       grossAgg,
       lastPayment
@@ -1747,19 +2114,25 @@ export class PaymentService {
       PaymentModel.countDocuments(),
       PaymentModel.countDocuments({ status: PaymentStatus.FINISHED }),
       PaymentModel.countDocuments({
-        status: {
-          $in: [
-            PaymentStatus.WAITING,
-            PaymentStatus.CONFIRMING,
-            PaymentStatus.CONFIRMED,
-            PaymentStatus.SENDING
-          ]
-        }
+        $or: [
+          {
+            status: {
+              $in: [
+                PaymentStatus.WAITING,
+                PaymentStatus.CONFIRMING,
+                PaymentStatus.CONFIRMED,
+                PaymentStatus.SENDING
+              ]
+            }
+          },
+          { status: PaymentStatus.FINISHED, isFulfilled: false }
+        ]
       }),
       PaymentModel.countDocuments({ status: PaymentStatus.FAILED }),
       PaymentModel.countDocuments({ status: { $in: [PaymentStatus.PARTIALLY_PAID, PaymentStatus.REVIEW_REQUIRED] } }),
       PaymentModel.countDocuments({ status: PaymentStatus.REFUNDED }),
       PaymentModel.countDocuments({ status: PaymentStatus.EXPIRED }),
+      PaymentModel.countDocuments({ status: PaymentStatus.REJECTED }),
       PaymentModel.countDocuments({ verified: true, isFulfilled: true }),
       PaymentModel.aggregate([
         { $match: { isFulfilled: true } },
@@ -1800,6 +2173,7 @@ export class PaymentService {
       refundedPayments: refundedOrders,
       verifiedPayments,
       expiredPayments: expiredOrders,
+      rejectedPayments: rejectedOrders,
       lastPaymentAt: lastPayment
         ? new Date((lastPayment as any).paidAt || (lastPayment as any).updatedAt).toISOString()
         : null

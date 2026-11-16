@@ -54,6 +54,23 @@ router.get('/admin/health', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req
   paymentController.getAdminHealth(req, res, next)
 );
 
+// Manual approval/rejection: server-side role check + provider re-verification.
+router.post(
+  '/admin/orders/:orderId/approve',
+  requireAuth,
+  requireRole(UserRole.SUPER_ADMIN),
+  rateLimit(10, 15, 'payment_manual_approve'),
+  (req, res, next) => paymentController.approveAdminPayment(req, res, next)
+);
+
+router.post(
+  '/admin/orders/:orderId/reject',
+  requireAuth,
+  requireRole(UserRole.SUPER_ADMIN),
+  rateLimit(10, 15, 'payment_manual_reject'),
+  (req, res, next) => paymentController.rejectAdminPayment(req, res, next)
+);
+
 router.get('/admin/export', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
   paymentController.exportAdminReport(req, res, next)
 );

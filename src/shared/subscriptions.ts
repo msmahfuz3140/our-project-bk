@@ -18,6 +18,7 @@ export enum PaymentStatus {
   FAILED = 'FAILED',
   REFUNDED = 'REFUNDED',
   EXPIRED = 'EXPIRED',
+  REJECTED = 'REJECTED',
   REVIEW_REQUIRED = 'REVIEW_REQUIRED'
 }
 
@@ -88,7 +89,7 @@ export interface PaymentHistoryDTO {
 
 export interface AdminPaymentFilterInput {
   search?: string;
-  status?: PaymentStatus;
+  status?: PaymentStatus | 'PENDING' | 'ALL';
   planId?: string;
   startDate?: string;
   endDate?: string;
@@ -117,6 +118,7 @@ export interface AdminPaymentSummary {
   refundedPayments: number;
   verifiedPayments: number;
   expiredPayments: number;
+  rejectedPayments: number;
   lastPaymentAt?: string | null;
 }
 

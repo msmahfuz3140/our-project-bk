@@ -193,6 +193,65 @@ export class PaymentController {
     }
   }
 
+  /**
+   * Manual approval of a pending payment. The service independently re-verifies
+   * the payment with NOWPayments before activating Premium and blocks duplicate
+   * or unpaid activations.
+   */
+  async approveAdminPayment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { orderId } = req.params;
+      const { reason } = req.body || {};
+      if (!reason || typeof reason !== 'string') {
+        throw ApiError.badRequest('A reason is required when manually approving a payment');
+      }
+
+      const result = await paymentService.approvePaymentManually(
+        orderId as string,
+        req.user!.id,
+        req.user!.email || 'admin',
+        reason
+      );
+
+      res.status(200).json({
+        success: true,
+        message: 'Payment verified and Premium subscription activated',
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Manual rejection of a pending payment. Records the admin, reason and audit
+   * trail; never deletes the payment record.
+   */
+  async rejectAdminPayment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { orderId } = req.params;
+      const { reason } = req.body || {};
+      if (!reason || typeof reason !== 'string') {
+        throw ApiError.badRequest('A reason is required when rejecting a payment');
+      }
+
+      const result = await paymentService.rejectPaymentManually(
+        orderId as string,
+        req.user!.id,
+        req.user!.email || 'admin',
+        reason
+      );
+
+      res.status(200).json({
+        success: true,
+        message: 'Payment rejected and audit record created',
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   async exportAdminReport(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { startDate, endDate, format } = req.query;
