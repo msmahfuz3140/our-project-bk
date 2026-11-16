@@ -538,8 +538,8 @@ export class AdminService {
       isEmailVerified?: boolean;
       isPhoneVerified?: boolean;
       role?: UserRole;
-      referralCommissionRate?: number;
-      referralCommissionType?: 'ONE_TIME' | 'LIFETIME';
+      referralCommissionRate?: number | null;
+      referralCommissionType?: 'ONE_TIME' | 'LIFETIME' | null;
       referralEligible?: boolean;
       moderatorCommissionRate?: number;
       moderatorNotes?: string;
@@ -608,18 +608,26 @@ export class AdminService {
     }
 
     if (input.referralCommissionRate !== undefined) {
-      const rate = Number(input.referralCommissionRate);
-      if (isNaN(rate) || rate < 0 || rate > 1) {
-        throw ApiError.badRequest('Referral commission rate must be between 0 and 1 (0%–100%)');
+      if (input.referralCommissionRate === null) {
+        user.referralCommissionRate = undefined;
+      } else {
+        const rate = Number(input.referralCommissionRate);
+        if (isNaN(rate) || rate < 0 || rate > 1) {
+          throw ApiError.badRequest('Referral commission rate must be between 0 and 1 (0%–100%)');
+        }
+        user.referralCommissionRate = Math.round(rate * 1000) / 1000;
       }
-      user.referralCommissionRate = Math.round(rate * 100) / 100;
     }
 
     if (input.referralCommissionType !== undefined) {
-      if (!['ONE_TIME', 'LIFETIME'].includes(input.referralCommissionType)) {
-        throw ApiError.badRequest('Referral commission type must be ONE_TIME or LIFETIME');
+      if (input.referralCommissionType === null) {
+        user.referralCommissionType = undefined;
+      } else {
+        if (!['ONE_TIME', 'LIFETIME'].includes(input.referralCommissionType)) {
+          throw ApiError.badRequest('Referral commission type must be ONE_TIME or LIFETIME');
+        }
+        user.referralCommissionType = input.referralCommissionType;
       }
-      user.referralCommissionType = input.referralCommissionType;
     }
 
     if (input.referralEligible !== undefined) {

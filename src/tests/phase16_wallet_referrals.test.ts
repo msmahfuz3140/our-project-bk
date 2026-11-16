@@ -4,6 +4,7 @@ import { paymentService } from '../services/payment.service';
 import { walletService } from '../services/wallet.service';
 import { commissionService } from '../services/commission.service';
 import { moderatorService } from '../services/moderator.service';
+import { adminService } from '../services/admin.service';
 import { nowPaymentsService } from '../services/nowpayments.service';
 import { CommissionPolicyModel } from '../models/CommissionPolicy';
 import { UserModel } from '../models/User';
@@ -451,6 +452,104 @@ async function run() {
   assert(updatedPolicy.defaultRate === 0.55, 'admin can update moderator lifetime rate');
   assert(policyAfter.normalUserRate === 0.35, 'admin can update normal user one-time rate');
   assert(policyAfter.referralEnabled === true, 'admin can enable/disable referral program');
+
+  console.log('\n[11. Admin individual commission editor from wallet management]');
+  const editReferrer = await createUser({
+    name: 'Admin Edited Referrer',
+    email: 'admin.edited.referrer@example.com'
+  });
+  const editBuyer = await createUser({
+    name: 'Admin Edited Buyer',
+    email: 'admin.edited.buyer@example.com',
+    referredBy: editReferrer._id
+  });
+
+  await adminService.updateUserProfile(
+    admin._id.toString(),
+    admin.email!,
+    editReferrer._id.toString(),
+    {
+      referralCommissionRate: 0.4,
+      referralCommissionType: 'LIFETIME',
+      referralEligible: true
+    },
+    'Phase 16 admin individual commission override'
+  );
+
+  const editedDoc = await UserModel.findById(editReferrer._id);
+  assert(editedDoc?.referralCommissionRate === 0.4, 'admin can set individual commission percentage');
+  assert(editedDoc?.referralCommissionType === 'LIFETIME', 'admin can switch earning type to lifetime');
+
+  const editedOrder1 = await paymentService.createPurchaseOrder(
+    editBuyer._id.toString(),
+    'PLAN_15_DAYS',
+    'TRX'
+  );
+  await processFinished(editedOrder1, '76001');
+  const editedOrder2 = await paymentService.createPurchaseOrder(
+    editBuyer._id.toString(),
+    'PLAN_15_DAYS',
+    'TRX'
+  );
+  await processFinished(editedOrder2, '76002');
+
+  const editedCommissions = await ReferralCommissionModel.find({
+    referredUserId: editBuyer._id
+  }).sort({ createdAt: 1 });
+  assert(editedCommissions.length === 2, 'lifetime override commissions on every purchase', editedCommissions.length);
+  assert(
+    editedCommissions.every((c) => c.commissionRate === 0.4 && c.commissionType === 'LIFETIME'),
+    'override rate and lifetime type applied to new purchases'
+  );
+
+  await adminService.updateUserProfile(
+    admin._id.toString(),
+    admin.email!,
+    editReferrer._id.toString(),
+    {
+      referralCommissionRate: null,
+      referralCommissionType: null
+    },
+    'Phase 16 reset individual commission to defaults'
+  );
+  const resetDoc = await UserModel.findById(editReferrer._id);
+  assert(
+    resetDoc?.referralCommissionRate === undefined || resetDoc?.referralCommissionRate === null,
+    'admin can reset commission percentage to the role default'
+  );
+  assert(
+    resetDoc?.referralCommissionType === undefined || resetDoc?.referralCommissionType === null,
+    'admin can reset earning type to the role default'
+  );
+
+  const editedOrder3 = await paymentService.createPurchaseOrder(
+    editBuyer._id.toString(),
+    'PLAN_1_MONTH',
+    'TRX'
+  );
+  await processFinished(editedOrder3, '76003');
+  const afterResetCommissions = await ReferralCommissionModel.find({
+    referredUserId: editBuyer._id
+  }).sort({ createdAt: 1 });
+  const historical = afterResetCommissions.find(
+    (c) => c.paymentId?.toString() === (editedCommissions[0].paymentId as any)?.toString()
+  );
+  assert(
+    historical?.commissionRate === 0.4 && historical?.status === 'CREDITED',
+    'historical commission remains unchanged after an admin reset'
+  );
+  const newPurchaseCommission = afterResetCommissions.find(
+    (c) => !editedCommissions.some((old) => old._id.equals(c._id))
+  );
+  assert(
+    newPurchaseCommission?.commissionRate === policyAfter.normalUserRate,
+    'future purchase uses the current platform default rate after reset',
+    { applied: newPurchaseCommission?.commissionRate, expected: policyAfter.normalUserRate }
+  );
+  assert(
+    newPurchaseCommission?.commissionType === 'ONE_TIME',
+    'future purchase uses the role default one-time type after reset'
+  );
 
   console.log('\n=============================================');
   console.log(`  PHASE 16 RESULTS: ${passed} PASSED, ${failed} FAILED`);

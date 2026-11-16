@@ -11,7 +11,9 @@ import { logger } from '../utils/logger';
 export function normalizeCommissionRate(value: unknown): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-  return numeric > 1 ? Math.round(numeric) / 100 : Math.round(numeric * 100) / 100;
+  return numeric > 1
+    ? Math.round(numeric * 100) / 10000
+    : Math.round(numeric * 10000) / 10000;
 }
 
 export class CommissionService {
