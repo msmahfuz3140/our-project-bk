@@ -132,7 +132,7 @@ const WebsiteSettingsSchema = new Schema<IWebsiteSettings>(
       background: { type: String, default: '#06080d' }
     },
     supportContact: {
-      email: { type: String, default: 'support@rouletteaccuracy.com' },
+      email: { type: String, default: 'support@accuracy.tools' },
       telegram: { type: String, default: 'https://t.me/roulettetools_support' },
       discord: { type: String, default: '' }
     },
