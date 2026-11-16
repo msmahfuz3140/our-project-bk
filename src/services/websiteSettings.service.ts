@@ -109,6 +109,18 @@ export class WebsiteSettingsService {
       changed = true;
     }
 
+    if (!settings.community) {
+      settings.community = {
+        enabled: true,
+        telegramName: 'Roulette Accuracy Official Community',
+        telegramLink: 'https://t.me/roulettetools',
+        description:
+          'Join our official Telegram community for live table alerts, platform updates, and direct access to the Accuracy.tools team.',
+        buttonText: 'Join Our Telegram Community'
+      };
+      changed = true;
+    }
+
     const legacyHeroTitle = 'Algorithmic Roulette Intelligence & Statistical Wheel Tracking';
     if (settings.homepageContent?.heroTitle === legacyHeroTitle) {
       settings.homepageContent.heroTitle = 'Read the wheel. Time the pattern.';
@@ -150,6 +162,16 @@ export class WebsiteSettingsService {
         supportContact: plain.supportContact,
         socialLinks: plain.socialLinks,
         homepageContent: plain.homepageContent,
+        community: {
+          enabled: plain.community?.enabled !== false,
+          telegramName:
+            plain.community?.telegramName || 'Roulette Accuracy Official Community',
+          telegramLink: plain.community?.telegramLink || 'https://t.me/roulettetools',
+          description:
+            plain.community?.description ||
+            'Join our official Telegram community for live table alerts, platform updates, and direct access to the Accuracy.tools team.',
+          buttonText: plain.community?.buttonText || 'Join Our Telegram Community'
+        },
         footerContent: plain.footerContent,
         faqItems: plain.faqItems,
         legalPolicies: plain.legalPolicies,
@@ -190,7 +212,8 @@ export class WebsiteSettingsService {
       siteName: settings.siteName,
       brandColors: settings.brandColors,
       supportContact: settings.supportContact,
-      homepageContent: settings.homepageContent
+      homepageContent: settings.homepageContent,
+      community: settings.community
     };
 
     if (updates.siteName !== undefined) {
@@ -237,6 +260,37 @@ export class WebsiteSettingsService {
       };
     }
 
+    if (updates.community) {
+      const current = settings.community || ({} as IWebsiteSettings['community']);
+      settings.community = {
+        enabled:
+          updates.community.enabled !== undefined
+            ? Boolean(updates.community.enabled)
+            : current.enabled !== false,
+        telegramName:
+          updates.community.telegramName !== undefined
+            ? sanitizeHtmlContent(updates.community.telegramName).slice(0, 100)
+            : current.telegramName || 'Roulette Accuracy Official Community',
+        telegramLink:
+          updates.community.telegramLink !== undefined
+            ? (() => {
+                const safe = safeTelegramSetting(updates.community.telegramLink);
+                if (!safe) return '';
+                if (/^https?:\/\//i.test(safe)) return safe;
+                return `https://t.me/${safe.replace(/^@/, '')}`;
+              })()
+            : current.telegramLink || '',
+        description:
+          updates.community.description !== undefined
+            ? sanitizeHtmlContent(updates.community.description).slice(0, 600)
+            : current.description || '',
+        buttonText:
+          updates.community.buttonText !== undefined
+            ? sanitizeHtmlContent(updates.community.buttonText).slice(0, 60)
+            : current.buttonText || 'Join Our Telegram Community'
+      };
+    }
+
     if (updates.footerContent) {
       settings.footerContent = {
         copyrightText: sanitizeHtmlContent(updates.footerContent.copyrightText || settings.footerContent.copyrightText),
@@ -277,7 +331,8 @@ export class WebsiteSettingsService {
         siteName: settings.siteName,
         brandColors: settings.brandColors,
         supportContact: settings.supportContact,
-        homepageContent: settings.homepageContent
+        homepageContent: settings.homepageContent,
+        community: settings.community
       },
       details: {
         sanitized: true,

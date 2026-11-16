@@ -4,6 +4,7 @@ import { SubscriptionStatus } from '../shared/subscriptions';
 export interface ISubscription extends Document {
   userId: mongoose.Types.ObjectId;
   planId: string;
+  customPlanName?: string;
   status: SubscriptionStatus;
   startDate: Date;
   endDate: Date;
@@ -40,6 +41,11 @@ const SubscriptionSchema = new Schema<ISubscription>({
   planId: {
     type: String,
     required: true
+  },
+  customPlanName: {
+    type: String,
+    trim: true,
+    maxlength: 100
   },
   status: {
     type: String,

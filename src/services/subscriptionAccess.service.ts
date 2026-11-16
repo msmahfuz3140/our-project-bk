@@ -21,12 +21,53 @@ import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 
 export class SubscriptionAccessService {
+  private lastExpirySweepAt = 0;
+  private expirySweepInFlight: Promise<number> | null = null;
+
   /**
-   * Authoritative server-side subscription validation.
-   * Evaluates user role, subscription status, start/end date boundaries, and revocation status.
-   * When a subscription is past its expiry date, dynamically updates database status to EXPIRED.
+   * Persist EXPIRED status for every ACTIVE subscription whose exact
+   * timestamp has passed. Access checks still compare endDate directly, so a
+   * delayed sweep can never grant access.
+   */
+  async expireExpiredSubscriptions(referenceDate: Date = new Date(), force = false): Promise<number> {
+    if (!force && Date.now() - this.lastExpirySweepAt < 15_000) return 0;
+    if (this.expirySweepInFlight) return this.expirySweepInFlight;
+
+    this.expirySweepInFlight = (async () => {
+      const result = await SubscriptionModel.updateMany(
+        {
+          status: SubscriptionStatus.ACTIVE,
+          isRevoked: { $ne: true },
+          endDate: { $lte: referenceDate }
+        },
+        { $set: { status: SubscriptionStatus.EXPIRED } }
+      );
+      this.lastExpirySweepAt = Date.now();
+      if (result.modifiedCount > 0) {
+        logger.info(`Auto-expired ${result.modifiedCount} subscription(s) at ${referenceDate.toISOString()}`);
+      }
+      return result.modifiedCount || 0;
+    })().finally(() => {
+      this.expirySweepInFlight = null;
+    });
+
+    return this.expirySweepInFlight;
+  }
+
+  /**
+   * Public authoritative access check. The returned serverTime lets the UI
+   * calculate a tamper-resistant countdown without trusting the device clock.
    */
   async checkAccess(userId: string): Promise<AccessStatusResponse> {
+    await this.expireExpiredSubscriptions().catch(() => null);
+    const result = await this.evaluateAccess(userId);
+    return {
+      ...result,
+      serverTime: new Date().toISOString()
+    };
+  }
+
+  private async evaluateAccess(userId: string): Promise<AccessStatusResponse> {
     const user = await UserModel.findById(userId);
     if (!user) {
       return {
@@ -73,10 +114,18 @@ export class SubscriptionAccessService {
       };
     }
 
-    // Fetch the most recent active or latest subscription
-    const sub = await SubscriptionModel.findOne({
-      userId: user._id
+    // Prefer a genuinely active subscription; otherwise inspect the latest one
+    // to report the correct expired/scheduled/revoked state.
+    const now = new Date();
+    const activeSub = await SubscriptionModel.findOne({
+      userId: user._id,
+      status: SubscriptionStatus.ACTIVE,
+      isRevoked: { $ne: true },
+      startDate: { $lte: now },
+      endDate: { $gt: now }
     }).sort({ endDate: -1 });
+
+    const sub = activeSub || await SubscriptionModel.findOne({ userId: user._id }).sort({ endDate: -1 });
 
     if (!sub) {
       // Main Admins and Moderators have full role-based access fallback if no individual subscription exists
@@ -96,8 +145,6 @@ export class SubscriptionAccessService {
         reason: 'No active subscription found. Please choose a subscription tier.'
       };
     }
-
-    const now = new Date();
 
     // Check revocation
     if (sub.isRevoked || sub.status === SubscriptionStatus.REVOKED) {
@@ -166,7 +213,7 @@ export class SubscriptionAccessService {
           needsSecretCode: true,
           isApproved: sub.isApprovedByAdmin !== false,
           planId: sub.planId,
-          planName: plan?.name || sub.planId,
+          planName: plan?.name || sub.customPlanName || sub.planId,
           status: SubscriptionStatus.ACTIVE,
           startDate: sub.startDate.toISOString(),
           endDate: sub.endDate.toISOString(),
@@ -176,6 +223,7 @@ export class SubscriptionAccessService {
             day: 'numeric'
           }),
           daysRemaining,
+          remainingMs: Math.max(0, msRemaining),
           reason: sub.isApprovedByAdmin !== false
             ? 'Your VIP subscription is active! Enter the Secret Activation Code sent to your email to unlock the tool.'
             : 'Your subscription purchase is pending admin approval. Your Secret Code will be dispatched upon approval.'
@@ -186,7 +234,7 @@ export class SubscriptionAccessService {
         hasAccess: true,
         code: 'ACCESS_GRANTED',
         planId: sub.planId,
-        planName: plan?.name || sub.planId,
+        planName: plan?.name || sub.customPlanName || sub.planId,
         status: SubscriptionStatus.ACTIVE,
         startDate: sub.startDate.toISOString(),
         endDate: sub.endDate.toISOString(),
@@ -196,6 +244,7 @@ export class SubscriptionAccessService {
           day: 'numeric'
         }),
         daysRemaining,
+        remainingMs: Math.max(0, msRemaining),
         needsSecretCode: false,
         isApproved: true,
         reason: 'Active premium subscription confirmed'
@@ -220,27 +269,55 @@ export class SubscriptionAccessService {
       throw ApiError.notFound(`User with email ${input.targetEmail} was not found`);
     }
 
-    const plan = await subscriptionService.getPlanById(input.planId);
-    if (!plan) {
+    const plan = input.planId ? await subscriptionService.getPlanById(input.planId) : undefined;
+    if (input.planId && !plan) {
       throw ApiError.notFound(`Plan ${input.planId} does not exist`);
     }
 
+    const duration =
+      input.durationUnit && input.durationValue
+        ? { unit: input.durationUnit, value: input.durationValue }
+        : plan?.duration;
+
+    if (!duration) {
+      throw ApiError.badRequest('A plan or custom duration is required for manual activation');
+    }
+
     const now = new Date();
-    const endDate = calculatePlanExpiration(now, plan.duration);
+    const startDate = input.startDate ? new Date(input.startDate) : now;
+    if (Number.isNaN(startDate.getTime())) {
+      throw ApiError.badRequest('Invalid subscription start date/time');
+    }
 
-    // Cancel prior active subscriptions for this user
-    await SubscriptionModel.updateMany(
-      { userId: targetUser._id, status: SubscriptionStatus.ACTIVE },
-      { $set: { status: SubscriptionStatus.CANCELLED } }
-    );
+    const endDate = calculatePlanExpiration(startDate, duration);
+    if (endDate.getTime() <= startDate.getTime()) {
+      throw ApiError.badRequest('Subscription expiration must be after its start time');
+    }
 
+    // A future-dated grant must not cancel the user's current access. An
+    // immediate grant replaces older ACTIVE records to avoid ambiguity.
+    if (startDate.getTime() <= now.getTime()) {
+      await SubscriptionModel.updateMany(
+        {
+          userId: targetUser._id,
+          status: SubscriptionStatus.ACTIVE,
+          isRevoked: { $ne: true }
+        },
+        { $set: { status: SubscriptionStatus.CANCELLED } }
+      );
+    }
+
+    const planId = plan?.id || 'CUSTOM_ADMIN_GRANT';
+    const customPlanName = plan ? undefined : input.customPlanName || `Custom ${duration.value} ${duration.unit}`;
+    const planName = plan?.name || customPlanName || 'Custom Admin Grant';
     const secretCode = generateSecretActivationCode();
 
     const subscription = await SubscriptionModel.create({
       userId: targetUser._id,
-      planId: plan.id,
+      planId,
+      customPlanName,
       status: SubscriptionStatus.ACTIVE,
-      startDate: now,
+      startDate,
       endDate,
       secretCode,
       isSecretCodeClaimed: true,
@@ -263,22 +340,26 @@ export class SubscriptionAccessService {
       reason: input.reason.trim(),
       newValue: {
         subscriptionId: subscription._id,
-        planId: plan.id,
+        planId,
+        customPlanName,
+        duration,
         secretCode,
-        startDate: now,
+        startDate,
         endDate,
         isManualGrant: true
       }
     });
 
-    logger.info(`Main Admin ${adminId} manually granted ${plan.id} to ${input.targetEmail}.`);
+    logger.info(
+      `Main Admin ${adminId} manually granted ${planId} (${duration.value} ${duration.unit}) to ${input.targetEmail}, ${startDate.toISOString()} → ${endDate.toISOString()}.`
+    );
 
     if (targetUser.email) {
       await emailService.sendVipSecretCodeEmail({
         to: targetUser.email,
         name: targetUser.name || 'Member',
-        planName: plan.name,
-        durationDays: plan.durationDays,
+        planName,
+        durationDays: Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / 86_400_000)),
         secretCode
       }).catch((err) => logger.error('Failed to dispatch secret code email on manual grant', err));
     }
@@ -286,8 +367,10 @@ export class SubscriptionAccessService {
     await notificationService.createNotification(
       targetUser._id,
       'SUBSCRIPTION_ACTIVATED',
-      '🎉 VIP Secret Activation Code Issued',
-      `Your subscription has been activated! Your Secret Code is ${secretCode}. Enter it on the Tool page to unlock.`,
+      '🎉 VIP Subscription Activated',
+      startDate.getTime() > now.getTime()
+        ? `Your ${planName} subscription has been scheduled from ${startDate.toISOString()} until ${endDate.toISOString()}. Your Secret Code is ${secretCode}.`
+        : `Your subscription has been activated until ${endDate.toISOString()}. Your Secret Code is ${secretCode}. Enter it on the Tool page to unlock.`,
       '/dashboard/tool'
     ).catch(() => null);
 
@@ -309,9 +392,11 @@ export class SubscriptionAccessService {
 
     const now = new Date();
     const baseDate = sub.endDate > now ? sub.endDate : now;
+    const extensionUnit = input.extensionUnit === 'YEARS' ? 'MONTHS' : input.extensionUnit;
+    const extensionValue = input.extensionUnit === 'YEARS' ? input.extensionValue * 12 : input.extensionValue;
     const newEndDate = calculatePlanExpiration(baseDate, {
-      unit: input.extensionUnit,
-      value: input.extensionValue
+      unit: extensionUnit,
+      value: extensionValue
     });
 
     const previousEndDate = sub.endDate;
@@ -517,14 +602,11 @@ export class SubscriptionAccessService {
     const query: any = {};
     const now = new Date();
 
-    // Dynamically mark active passes that have passed their endDate as EXPIRED in MongoDB
+    // Persist EXPIRED for all passes whose exact end timestamp has passed.
     try {
-      await SubscriptionModel.updateMany(
-        { status: SubscriptionStatus.ACTIVE, endDate: { $lte: now } },
-        { $set: { status: SubscriptionStatus.EXPIRED } }
-      );
-    } catch (e) {
-      // Ignore background sync errors
+      await this.expireExpiredSubscriptions(now, true);
+    } catch {
+      // Access checks still enforce endDate directly if the sweep fails.
     }
 
     if (options?.status && options.status !== 'ALL') {
@@ -542,6 +624,10 @@ export class SubscriptionAccessService {
           { status: SubscriptionStatus.REVOKED },
           { isRevoked: true }
         ];
+      } else if (options.status === 'INACTIVE') {
+        query.status = {
+          $in: [SubscriptionStatus.CANCELLED, SubscriptionStatus.REVOKED, SubscriptionStatus.PENDING]
+        };
       } else if (options.status === 'CLAIM_PENDING') {
         query.status = SubscriptionStatus.ACTIVE;
         query.endDate = { $gt: now };
@@ -570,6 +656,7 @@ export class SubscriptionAccessService {
 
       const searchConditions: any[] = [
         { planId: searchRegex },
+        { customPlanName: searchRegex },
         { secretCode: searchRegex },
         { grantReason: searchRegex },
         { userId: { $in: userIds } }
@@ -611,11 +698,18 @@ export class SubscriptionAccessService {
     const subscriptions = rawSubscriptions.map((s: any) => {
       const msRemaining = s.endDate ? new Date(s.endDate).getTime() - now.getTime() : 0;
       const matchedPlan = s.planId ? planMap.get(s.planId.toLowerCase()) : null;
+      const isExpired = msRemaining <= 0 || s.status === SubscriptionStatus.EXPIRED;
       return {
         ...s,
-        planName: matchedPlan?.name || s.planId.replace(/_/g, ' '),
+        planName:
+          matchedPlan?.name ||
+          s.customPlanName ||
+          s.planId.replace(/_/g, ' '),
         planPriceUsd: matchedPlan?.priceUsd || (matchedPlan?.priceCents ? matchedPlan.priceCents / 100 : undefined),
-        daysRemaining: Math.max(0, Math.ceil(msRemaining / (1000 * 60 * 60 * 24)))
+        daysRemaining: Math.max(0, Math.ceil(msRemaining / (1000 * 60 * 60 * 24))),
+        remainingMs: Math.max(0, msRemaining),
+        isExpired,
+        expiresAtFormatted: s.endDate ? new Date(s.endDate).toLocaleString('en-US') : null
       };
     });
 

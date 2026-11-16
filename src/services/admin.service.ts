@@ -273,22 +273,41 @@ export class AdminService {
       query.role = targetRole;
     }
 
-    if (filter.subscriptionStatus === 'ACTIVE') {
-      const activeSubs = await SubscriptionModel.find({
-        status: SubscriptionStatus.ACTIVE,
-        isRevoked: { $ne: true },
-        endDate: { $gt: new Date() }
-      }).select('userId').lean();
-      const activeUserIds = activeSubs.map((s) => s.userId);
-      query._id = { $in: activeUserIds };
-    } else if (filter.subscriptionStatus === 'INACTIVE' || filter.subscriptionStatus === 'EXPIRED') {
-      const activeSubs = await SubscriptionModel.find({
-        status: SubscriptionStatus.ACTIVE,
-        isRevoked: { $ne: true },
-        endDate: { $gt: new Date() }
-      }).select('userId').lean();
-      const activeUserIds = activeSubs.map((s) => s.userId);
-      query._id = { $nin: activeUserIds };
+    if (filter.subscriptionStatus) {
+      const now = new Date();
+      await SubscriptionModel.updateMany(
+        { status: SubscriptionStatus.ACTIVE, isRevoked: { $ne: true }, endDate: { $lte: now } },
+        { $set: { status: SubscriptionStatus.EXPIRED } }
+      ).catch(() => null);
+
+      const [activeSubs, subscriptionUserIds] = await Promise.all([
+        SubscriptionModel.find({
+          status: SubscriptionStatus.ACTIVE,
+          isRevoked: { $ne: true },
+          endDate: { $gt: now }
+        }).select('userId').lean(),
+        SubscriptionModel.distinct('userId')
+      ]);
+
+      const activeIds = new Set(activeSubs.map((s) => s.userId.toString()));
+      const allSubscriberIds = subscriptionUserIds.map((id: any) => id.toString());
+
+      if (filter.subscriptionStatus === 'ACTIVE') {
+        query._id = { $in: activeSubs.map((s) => s.userId) };
+      } else if (filter.subscriptionStatus === 'EXPIRED') {
+        const expiredIds = allSubscriberIds.filter((id) => !activeIds.has(id));
+        query._id = {
+          $in: expiredIds
+            .filter((id) => mongoose.Types.ObjectId.isValid(id))
+            .map((id) => new mongoose.Types.ObjectId(id))
+        };
+      } else if (filter.subscriptionStatus === 'INACTIVE') {
+        query._id = {
+          $nin: allSubscriberIds
+            .filter((id) => mongoose.Types.ObjectId.isValid(id))
+            .map((id) => new mongoose.Types.ObjectId(id))
+        };
+      }
     }
 
     if (filter.search && filter.search.trim() !== '') {
@@ -390,9 +409,12 @@ export class AdminService {
       const targetSub = activeSub || latestSub;
       if (targetSub) {
         const pObj = planMap.get(targetSub.planId);
-        const resolvedPlanName = pObj?.name || targetSub.planId?.replace(/_/g, ' ').toUpperCase();
+        const resolvedPlanName =
+          pObj?.name ||
+          targetSub.customPlanName ||
+          targetSub.planId?.replace(/_/g, ' ').toUpperCase();
         const isExpired = !activeSub && (new Date(targetSub.endDate).getTime() <= now.getTime() || targetSub.status === SubscriptionStatus.EXPIRED);
-        const msRemaining = new Date(targetSub.endDate).getTime() - now.getTime();
+        const msRemaining = Math.max(0, new Date(targetSub.endDate).getTime() - now.getTime());
         const daysRemaining = isExpired ? 0 : Math.max(0, Math.ceil(msRemaining / (1000 * 60 * 60 * 24)));
         userObj.activeSubscription = {
           ...targetSub,
@@ -400,6 +422,7 @@ export class AdminService {
           _id: targetSub._id?.toString(),
           planName: resolvedPlanName,
           daysRemaining,
+          remainingMs: msRemaining,
           isExpired
         };
       } else {
@@ -454,7 +477,7 @@ export class AdminService {
     const mappedSubs = subscriptions.map((s: any) => ({
       ...s,
       id: s._id.toString(),
-      planName: planMap.get(s.planId)?.name || s.planId?.replace(/_/g, ' ').toUpperCase()
+      planName: planMap.get(s.planId)?.name || s.customPlanName || s.planId?.replace(/_/g, ' ').toUpperCase()
     }));
 
     const mappedPayments = payments.map((p: any) => ({

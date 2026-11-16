@@ -164,7 +164,7 @@ export class DashboardService {
           ? {
               ...activeSubscription,
               id: activeSubscription._id.toString(),
-              planName: planMap.get(activeSubscription.planId)?.name || activeSubscription.planId,
+              planName: planMap.get(activeSubscription.planId)?.name || activeSubscription.customPlanName || activeSubscription.planId,
               daysRemaining: Math.max(
                 0,
                 Math.ceil((new Date(activeSubscription.endDate).getTime() - now.getTime()) / 86_400_000)
@@ -174,7 +174,7 @@ export class DashboardService {
         subscriptionHistory: subscriptionHistory.map((sub: any) => ({
           ...sub,
           id: sub._id.toString(),
-          planName: planMap.get(sub.planId)?.name || sub.planId
+          planName: planMap.get(sub.planId)?.name || sub.customPlanName || sub.planId
         })),
         paymentSummary: {
           totalPayments: paymentTotals.totalPayments || 0,

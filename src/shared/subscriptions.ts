@@ -193,6 +193,8 @@ export interface AccessStatusResponse {
   isRoleBypass?: boolean; // True for Main Admin & Moderator
   needsSecretCode?: boolean;
   isApproved?: boolean;
+  serverTime?: string; // Authoritative server clock used by the UI countdown
+  remainingMs?: number;
 }
 
 export const UnlockToolSchema = z.object({
@@ -201,18 +203,35 @@ export const UnlockToolSchema = z.object({
 
 export type UnlockToolInput = z.infer<typeof UnlockToolSchema>;
 
-export const GrantManualSubscriptionSchema = z.object({
-  targetEmail: z.string().email('Valid user email is required'),
-  planId: z.string().min(1, 'Plan ID is required'),
-  reason: z.string().min(3, 'Detailed reason for manual grant is required')
-});
+export const GrantManualSubscriptionSchema = z
+  .object({
+    targetEmail: z.string().email('Valid user email is required'),
+    planId: z.string().min(1, 'Plan ID is required').optional(),
+    startDate: z
+      .string()
+      .datetime({ offset: true, message: 'startDate must be a valid ISO-8601 date/time' })
+      .optional(),
+    durationValue: z.number().int().min(1).max(3650).optional(),
+    durationUnit: z.enum(['DAYS', 'MONTHS']).optional(),
+    customPlanName: z.string().trim().min(2).max(100).optional(),
+    reason: z.string().min(3, 'Detailed reason for manual grant is required')
+  })
+  .superRefine((value, ctx) => {
+    if (!value.planId && (!value.durationValue || !value.durationUnit)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['durationValue'],
+        message: 'Select a plan or provide a custom duration value and unit'
+      });
+    }
+  });
 
 export type GrantManualSubscriptionInput = z.infer<typeof GrantManualSubscriptionSchema>;
 
 export const ExtendSubscriptionSchema = z.object({
   subscriptionId: z.string().min(1, 'Subscription ID is required'),
-  extensionValue: z.number().int().min(1, 'Extension duration value must be positive integer'),
-  extensionUnit: z.enum(['DAYS', 'MONTHS']),
+  extensionValue: z.number().int().min(1, 'Extension duration value must be positive integer').max(3650),
+  extensionUnit: z.enum(['DAYS', 'MONTHS', 'YEARS']),
   reason: z.string().min(3, 'Reason for extension is required')
 });
 

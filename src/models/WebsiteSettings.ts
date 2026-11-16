@@ -84,6 +84,13 @@ export interface IWebsiteSettings extends Document {
     heroSubtitle: string;
     announcementBanner: string;
   };
+  community: {
+    enabled: boolean;
+    telegramName: string;
+    telegramLink: string;
+    description: string;
+    buttonText: string;
+  };
   footerContent: {
     copyrightText: string;
     disclaimerText: string;
@@ -146,6 +153,18 @@ const WebsiteSettingsSchema = new Schema<IWebsiteSettings>(
       heroTitle: { type: String, default: 'Read the wheel. Time the pattern.' },
       heroSubtitle: { type: String, default: 'Roulette Accuracy turns live European wheel telemetry into a clear, direction-aware precision layer — dealer rhythm, n9 sector mapping and travel mathematics in one place.' },
       announcementBanner: { type: String, default: '' }
+    },
+    community: {
+      enabled: { type: Boolean, default: true },
+      telegramName: { type: String, default: 'Roulette Accuracy Official Community', trim: true, maxlength: 100 },
+      telegramLink: { type: String, default: 'https://t.me/roulettetools', trim: true, maxlength: 300 },
+      description: {
+        type: String,
+        default: 'Join our official Telegram community for live table alerts, platform updates, and direct access to the Accuracy.tools team.',
+        trim: true,
+        maxlength: 600
+      },
+      buttonText: { type: String, default: 'Join Our Telegram Community', trim: true, maxlength: 60 }
     },
     footerContent: {
       copyrightText: { type: String, default: '© 2026 Roulette Accuracy. All rights reserved.' },
