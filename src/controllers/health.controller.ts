@@ -3,7 +3,15 @@ import { db } from '../database/connection';
 import { env, validateCoreEnvironment, validatePaymentEnvironment, isProductionRuntime } from '../config/env';
 import { nowPaymentsService } from '../services/nowpayments.service';
 
-export function getHealth(req: Request, res: Response): void {
+export async function getHealth(req: Request, res: Response): Promise<void> {
+  if (db.getHealth().readyState === 0) {
+    try {
+      await db.connect();
+    } catch {
+      // Handled by db.getHealth() below
+    }
+  }
+
   const dbHealth = db.getHealth();
   const paymentConfig = nowPaymentsService.getConfigurationStatus();
   const coreIssues = validateCoreEnvironment();
