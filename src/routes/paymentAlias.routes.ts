@@ -48,4 +48,12 @@ router.get('/payments/:id', requireAuth, (req, res, next) =>
   paymentController.getPaymentById(req, res, next)
 );
 
+// GET & POST /api/cron/check-payments (Vercel Cron endpoint)
+router.get('/cron/check-payments', rateLimit(120, 1, 'cron_check'), (req, res, next) =>
+  paymentController.reconcileCronPayments(req, res, next)
+);
+router.post('/cron/check-payments', rateLimit(120, 1, 'cron_check'), (req, res, next) =>
+  paymentController.reconcileCronPayments(req, res, next)
+);
+
 export const paymentAliasRoutes = router;

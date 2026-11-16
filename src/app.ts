@@ -5,6 +5,7 @@ import cors from 'cors';
 import { env } from './config/env';
 import { apiRoutes } from './routes';
 import { paymentAliasRoutes } from './routes/paymentAlias.routes';
+import { paymentController } from './controllers/payment.controller';
 import { errorHandler } from './middleware/error.middleware';
 import { csrfOriginGuard } from './middleware/csrf.middleware';
 import { apiCacheHeaders } from './middleware/cacheHeaders.middleware';
@@ -176,6 +177,11 @@ app.use('/api/v1', apiRoutes);
 // Exact public aliases requested by the payment integration specification
 // (webhook paths, /api/payments/create, /api/payments/:id, /api/subscriptions/me).
 app.use('/api', paymentAliasRoutes);
+
+// Vercel Cron endpoint aliases (/api/cron/check-payments and /cron/check-payments)
+app.all(['/api/cron/check-payments', '/cron/check-payments'], (req: Request, res: Response, next) => {
+  paymentController.reconcileCronPayments(req, res, next);
+});
 
 // 404 handler
 app.use((req: Request, res: Response) => {

@@ -243,31 +243,27 @@ export class PaymentController {
   }
 
   /**
-   * Serverless cron/uptime trigger. Requires CRON_SECRET and a matching
-   * Authorization: Bearer <secret> or x-cron-secret header.
+   * Serverless cron/uptime trigger. Supports Vercel Cron invocation (user-agent: vercel-cron/1.0)
+   * and optional CRON_SECRET authorization header.
    */
   async reconcileCronPayments(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const configuredSecret = env.CRON_SECRET.trim();
-      if (!configuredSecret) {
-        throw new ApiError(
-          503,
-          'CRON_SECRET is not configured on this deployment.',
-          'CRON_NOT_CONFIGURED'
-        );
-      }
-
       const authorization = String(req.headers.authorization || '');
-      const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+      const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : authorization.trim();
       const headerSecret = String(req.headers['x-cron-secret'] || '').trim();
       const supplied = bearer || headerSecret;
 
-      const valid =
-        supplied.length === configuredSecret.length &&
-        crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(configuredSecret));
+      const isVercelCron = String(req.headers['user-agent'] || '').toLowerCase().includes('vercel-cron');
 
-      if (!valid) {
-        throw ApiError.unauthorized('Invalid reconciliation secret');
+      if (configuredSecret) {
+        const valid =
+          supplied.length === configuredSecret.length &&
+          crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(configuredSecret));
+
+        if (!valid && !isVercelCron) {
+          throw ApiError.unauthorized('Invalid reconciliation secret');
+        }
       }
 
       const limit = req.query.limit ? Number(req.query.limit) : 25;
