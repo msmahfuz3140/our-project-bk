@@ -213,7 +213,7 @@ export class PaymentService {
           if (paymentErr?.statusCode === 400 && errMsg.includes('minimal')) {
             throw new ApiError(
               400,
-              `NOWPayments minimum deposit limit for ${normalizedPayCurrency} is higher than $${plan.priceUsd}. Please select another cryptocurrency (such as TRX or LTC, which support payments from $0.20) or choose a higher tier plan.`,
+              `Minimum deposit limit for ${normalizedPayCurrency} is higher than $${plan.priceUsd}. Please select another cryptocurrency (such as TRX or LTC, which support payments from $0.20) or choose a higher tier plan.`,
               'PAYMENT_BELOW_MINIMUM'
             );
           }
@@ -327,7 +327,7 @@ export class PaymentService {
 
           throw new ApiError(
             502,
-            'Unable to initialize the crypto checkout with NOWPayments. Please try again shortly.',
+            'Unable to initialize cryptocurrency checkout. Please try again shortly.',
             'PAYMENT_PROVIDER_ERROR'
           );
         }
