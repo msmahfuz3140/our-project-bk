@@ -5,6 +5,7 @@ import { ensurePaymentIndexes } from './database/ensureIndexes';
 import { ensureSecurityBaseline } from './database/ensureIndexes';
 import { initializeAuthoritativeAdmin } from './database/initAdmin';
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job';
+import { startPaymentReconciliationJob } from './jobs/paymentReconciliation.job';
 import { logger } from './utils/logger';
 
 async function bootstrap() {
@@ -34,6 +35,7 @@ async function bootstrap() {
   // statuses (and admin filters) consistent in long-running deployments.
   if (env.NODE_ENV !== 'test') {
     startSubscriptionExpiryJob();
+    startPaymentReconciliationJob();
   }
 
   const server = app.listen(env.PORT, () => {

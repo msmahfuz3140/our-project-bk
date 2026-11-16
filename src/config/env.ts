@@ -35,6 +35,9 @@ const envSchema = z.object({
     .default('true')
     .transform((value) => value !== 'false' && value !== '0'),
   NOWPAYMENTS_API_TIMEOUT_MS: z.string().default('15000').transform(Number),
+  // Optional shared secret for a serverless cron/uptime job that reconciles
+  // pending NOWPayments orders when the provider webhook is delayed or absent.
+  CRON_SECRET: z.string().default(''),
 
   // Optional Redis-compatible REST cache (Upstash / Vercel KV).
   // When absent, the application uses a process-local memory cache.

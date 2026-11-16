@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { paymentService } from '../services/payment.service';
 import { nowPaymentsService } from '../services/nowpayments.service';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { UserRole } from '../shared/roles';
+import { env } from '../config/env';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 
@@ -216,6 +218,63 @@ export class PaymentController {
       res.status(200).json({
         success: true,
         message: 'Payment verified and Premium subscription activated',
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Admin-triggered reconciliation for pending payments.
+   */
+  async reconcileAdminPayments(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const limit = req.body?.limit ? Number(req.body.limit) : 25;
+      const result = await paymentService.reconcilePendingPayments({ limit });
+      res.status(200).json({
+        success: true,
+        message: `Reconciled pending payments: ${result.fulfilled} activated, ${result.updated} updated, ${result.failed} failed.`,
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Serverless cron/uptime trigger. Requires CRON_SECRET and a matching
+   * Authorization: Bearer <secret> or x-cron-secret header.
+   */
+  async reconcileCronPayments(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const configuredSecret = env.CRON_SECRET.trim();
+      if (!configuredSecret) {
+        throw new ApiError(
+          503,
+          'CRON_SECRET is not configured on this deployment.',
+          'CRON_NOT_CONFIGURED'
+        );
+      }
+
+      const authorization = String(req.headers.authorization || '');
+      const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+      const headerSecret = String(req.headers['x-cron-secret'] || '').trim();
+      const supplied = bearer || headerSecret;
+
+      const valid =
+        supplied.length === configuredSecret.length &&
+        crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(configuredSecret));
+
+      if (!valid) {
+        throw ApiError.unauthorized('Invalid reconciliation secret');
+      }
+
+      const limit = req.query.limit ? Number(req.query.limit) : 25;
+      const result = await paymentService.reconcilePendingPayments({ limit });
+      res.status(200).json({
+        success: true,
+        message: `Reconciliation complete: ${result.fulfilled} activated, ${result.updated} updated, ${result.failed} failed.`,
         data: result
       });
     } catch (error) {

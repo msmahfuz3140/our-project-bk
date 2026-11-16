@@ -54,6 +54,10 @@ router.get('/admin/health', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req
   paymentController.getAdminHealth(req, res, next)
 );
 
+router.post('/admin/reconcile', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
+  paymentController.reconcileAdminPayments(req, res, next)
+);
+
 // Manual approval/rejection: server-side role check + provider re-verification.
 router.post(
   '/admin/orders/:orderId/approve',
@@ -73,6 +77,15 @@ router.post(
 
 router.get('/admin/export', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
   paymentController.exportAdminReport(req, res, next)
+);
+
+// Serverless cron / uptime reconciliation. Protected by CRON_SECRET, not a
+// user session, so it can run even when no admin is logged in.
+router.get('/reconcile', rateLimit(60, 1, 'payment_reconcile'), (req, res, next) =>
+  paymentController.reconcileCronPayments(req, res, next)
+);
+router.post('/reconcile', rateLimit(60, 1, 'payment_reconcile'), (req, res, next) =>
+  paymentController.reconcileCronPayments(req, res, next)
 );
 
 // Authenticated: payment history (must precede /:id)

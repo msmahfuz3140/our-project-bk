@@ -444,12 +444,60 @@ export class PaymentService {
       throw ApiError.badRequest('Invalid NOWPayments IPN payload');
     }
 
+    const recordRejectedWebhook = async (reason: string, eventType: string) => {
+      try {
+        const orderId = String((payload as any).order_id || '').trim();
+        const providerPaymentId = String((payload as any).payment_id || '').trim();
+        const relatedPayment = (
+          orderId || providerPaymentId
+            ? await PaymentModel.findOne({
+                $or: [
+                  ...(orderId ? [{ orderId }] : []),
+                  ...(providerPaymentId ? [{ providerPaymentId }, { paymentId: providerPaymentId }] : [])
+                ]
+              })
+                .select('_id')
+                .lean()
+            : null
+        ) as { _id?: mongoose.Types.ObjectId } | null;
+
+        const eventId = `rejected:${eventType}:${nowPaymentsService.buildEventId(
+          payload as Record<string, unknown>
+        )}`;
+
+        await PaymentEventModel.findOneAndUpdate(
+          { providerEventId: eventId },
+          {
+            $set: {
+              provider: 'NOWPAYMENTS',
+              providerEventId: eventId,
+              paymentId: relatedPayment?._id,
+              providerPaymentId: providerPaymentId || undefined,
+              orderId: orderId || undefined,
+              eventType,
+              processingStatus: 'REJECTED',
+              signatureValid: false,
+              errorMessage: reason,
+              receivedAt: new Date(),
+              processedAt: new Date(),
+              rawPayload: payload
+            }
+          },
+          { upsert: true }
+        );
+      } catch {
+        // Diagnostics must never mask the original security rejection.
+      }
+    };
+
     if (!signature || signature.trim() === '') {
+      await recordRejectedWebhook('Missing x-nowpayments-sig signature header', 'missing_signature');
       logger.warn('NOWPayments IPN rejected: missing x-nowpayments-sig header');
       throw ApiError.unauthorized('Missing x-nowpayments-sig signature header');
     }
 
     if (!nowPaymentsService.verifyIpnSignature(payload, signature, secret)) {
+      await recordRejectedWebhook('Invalid IPN signature', 'invalid_signature');
       logger.warn('NOWPayments IPN rejected: signature mismatch', {
         orderId: payload.order_id,
         paymentId: payload.payment_id
@@ -652,9 +700,15 @@ export class PaymentService {
     }
 
     if (payment.providerInvoiceId && providerInvoiceId && payment.providerInvoiceId !== providerInvoiceId) {
-      return rejectForReview(
-        `Provider invoice id mismatch: stored ${payment.providerInvoiceId}, received ${providerInvoiceId}`
-      );
+      // The direct payment and hosted-invoice flows can expose different
+      // provider invoice references for the same order. The signed payment_id,
+      // order_id, amount and currency remain authoritative; do not force a
+      // valid settled payment into manual review solely on invoice metadata.
+      logger.warn('Provider invoice reference differs from stored invoice; continuing with signed payment validation', {
+        orderId: payment.orderId,
+        storedInvoiceId: payment.providerInvoiceId,
+        receivedInvoiceId: providerInvoiceId
+      });
     }
 
     const duplicateProviderPayment = await PaymentModel.findOne({
@@ -664,9 +718,17 @@ export class PaymentService {
     }).select('_id orderId').lean();
 
     if (duplicateProviderPayment) {
-      return rejectForReview(
-        `Provider payment id ${providerPaymentId} is already linked to order ${(duplicateProviderPayment as any).orderId}`
-      );
+      const duplicateOrderId = String((duplicateProviderPayment as any).orderId || '');
+      if (duplicateOrderId && duplicateOrderId === payment.orderId) {
+        logger.warn('Duplicate local payment document for the same order; continuing with authoritative order validation', {
+          orderId: payment.orderId,
+          providerPaymentId
+        });
+      } else {
+        return rejectForReview(
+          `Provider payment id ${providerPaymentId} is already linked to order ${duplicateOrderId || 'another order'}`
+        );
+      }
     }
 
     const reportedPriceAmount = asFiniteNumber(payload.price_amount);
@@ -1556,18 +1618,35 @@ export class PaymentService {
   async getPaymentDetails(identifier: string, userId: string, isSuperAdmin: boolean): Promise<any> {
     let order = await this.getOrderByIdentifier(identifier, userId, isSuperAdmin);
 
-    // Live provider sync: if order is still waiting/processing and has a providerPaymentId,
-    // poll NOWPayments to detect finished/confirmed deposits immediately.
+    // Live provider sync: if an order is pending, in review, or marked FINISHED
+    // without fulfilment, ask NOWPayments for the authoritative status. This
+    // recovers missed webhooks and transient review conditions automatically.
     if (
       order.providerPaymentId &&
-      [PaymentStatus.WAITING, PaymentStatus.CONFIRMING, PaymentStatus.SENDING, PaymentStatus.PARTIALLY_PAID].includes(order.status) &&
-      nowPaymentsService.isConfigured
+      nowPaymentsService.isConfigured &&
+      (
+        [
+          PaymentStatus.WAITING,
+          PaymentStatus.CONFIRMING,
+          PaymentStatus.CONFIRMED,
+          PaymentStatus.SENDING,
+          PaymentStatus.PARTIALLY_PAID,
+          PaymentStatus.REVIEW_REQUIRED
+        ].includes(order.status) ||
+        (order.status === PaymentStatus.FINISHED && !order.isFulfilled)
+      )
     ) {
       try {
         const npStatus = await nowPaymentsService.getPayment(order.providerPaymentId);
         if (npStatus && npStatus.payment_status) {
           const remoteStatus = String(npStatus.payment_status).toLowerCase().trim();
-          if (remoteStatus !== (order.providerStatus || '').toLowerCase()) {
+          const needsFulfillmentRetry =
+            remoteStatus === 'finished' && !order.isFulfilled;
+
+          if (
+            remoteStatus !== (order.providerStatus || '').toLowerCase() ||
+            needsFulfillmentRetry
+          ) {
             if (['finished', 'confirmed', 'sending'].includes(remoteStatus)) {
               const syntheticSignature = nowPaymentsService.generateIpnSignature(
                 npStatus,
@@ -1713,6 +1792,125 @@ export class PaymentService {
           }
         : null
     };
+  }
+
+  /**
+   * Server-side reconciliation fallback. This does not replace the webhook:
+   * it periodically asks NOWPayments for the authoritative status of pending
+   * orders so a missed/delayed IPN cannot leave a paid customer stuck forever.
+   */
+  async reconcilePendingPayments(options: {
+    limit?: number;
+    maxAgeHours?: number;
+  } = {}): Promise<{
+    checked: number;
+    fulfilled: number;
+    updated: number;
+    failed: number;
+    skipped: number;
+  }> {
+    if (!nowPaymentsService.isConfigured) {
+      throw new ApiError(
+        503,
+        'NOWPayments API is not configured. Reconciliation cannot run.',
+        'PAYMENT_PROVIDER_NOT_CONFIGURED'
+      );
+    }
+    if (!env.NOWPAYMENTS_IPN_SECRET.trim()) {
+      throw new ApiError(
+        503,
+        'NOWPayments IPN secret is not configured. Reconciliation cannot verify provider payloads.',
+        'PAYMENT_WEBHOOK_NOT_CONFIGURED'
+      );
+    }
+
+    const limit = Math.min(50, Math.max(1, options.limit || 15));
+    const maxAgeHours = Math.min(24 * 14, Math.max(1, options.maxAgeHours || 72));
+    const since = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
+
+    const candidates = await PaymentModel.find({
+      provider: 'NOWPAYMENTS',
+      providerPaymentId: { $exists: true, $nin: ['', null] },
+      isFulfilled: false,
+      createdAt: { $gte: since },
+      $or: [
+        {
+          status: {
+            $in: [
+              PaymentStatus.WAITING,
+              PaymentStatus.CONFIRMING,
+              PaymentStatus.CONFIRMED,
+              PaymentStatus.SENDING,
+              PaymentStatus.PARTIALLY_PAID,
+              PaymentStatus.REVIEW_REQUIRED
+            ]
+          }
+        },
+        { status: PaymentStatus.FINISHED }
+      ]
+    })
+      .sort({ createdAt: 1 })
+      .limit(limit)
+      .select('_id orderId providerPaymentId providerStatus status')
+      .lean();
+
+    let checked = 0;
+    let fulfilled = 0;
+    let updated = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    for (const candidate of candidates) {
+      try {
+        const remote = await nowPaymentsService.getPayment(String(candidate.providerPaymentId));
+        const remoteStatus = String(remote?.payment_status || '').toLowerCase().trim();
+
+        if (!remoteStatus) {
+          skipped += 1;
+          continue;
+        }
+
+        if (
+          remoteStatus === String(candidate.providerStatus || '').toLowerCase() &&
+          candidate.status !== PaymentStatus.FINISHED &&
+          candidate.status !== PaymentStatus.REVIEW_REQUIRED
+        ) {
+          skipped += 1;
+          continue;
+        }
+
+        checked += 1;
+        const syntheticSignature = nowPaymentsService.generateIpnSignature(
+          remote,
+          env.NOWPAYMENTS_IPN_SECRET
+        );
+        const result = await this.processIpnCallback(remote as any, syntheticSignature);
+
+        if (result.isFulfilled) {
+          fulfilled += 1;
+          logger.info('Pending payment auto-fulfilled by reconciliation', {
+            orderId: candidate.orderId,
+            providerPaymentId: candidate.providerPaymentId,
+            remoteStatus
+          });
+        } else if (result.status !== candidate.status) {
+          updated += 1;
+        }
+      } catch (error: any) {
+        failed += 1;
+        logger.warn('Pending payment reconciliation failed for one order', {
+          orderId: candidate.orderId,
+          providerPaymentId: candidate.providerPaymentId,
+          error: error?.message
+        });
+      }
+    }
+
+    if (candidates.length > 0) {
+      invalidatePaymentCaches();
+    }
+
+    return { checked, fulfilled, updated, failed, skipped };
   }
 
   /**
