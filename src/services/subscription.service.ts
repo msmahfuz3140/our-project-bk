@@ -1,7 +1,8 @@
 import {
   SubscriptionPlan,
   UpdatePlanInput,
-  CreatePlanInput
+  CreatePlanInput,
+  PLANS_ARRAY
 } from '../shared/plans';
 import { subscriptionRepository } from '../repositories/subscription.repository';
 import { PlanModel, seedPlansIfEmpty, IPlanDocument } from '../models/Plan';
@@ -44,18 +45,36 @@ export class SubscriptionService {
     };
   }
 
-  async getPublicPlans(): Promise<SubscriptionPlan[]> {
-    if (mongoose.connection.readyState !== 1) {
-      throw ApiError.internal('Subscription plan database is unavailable');
+  private async ensureDatabaseConnection(): Promise<boolean> {
+    if (mongoose.connection.readyState === 1) return true;
+    try {
+      const { db } = require('../database/connection');
+      return await db.connect();
+    } catch {
+      return false;
     }
+  }
+
+  async getPublicPlans(): Promise<SubscriptionPlan[]> {
+    await this.ensureDatabaseConnection();
 
     return memoryCache.getOrSet(cacheKeys.publicPlans, 60, async () => {
-      await seedPlansIfEmpty();
-      const docs = await PlanModel.find({ isActive: true, isVisible: true })
-        .sort({ displayOrder: 1, priceCents: 1 })
-        .lean();
+      try {
+        if (mongoose.connection.readyState === 1) {
+          await seedPlansIfEmpty().catch(() => {});
+          const docs = await PlanModel.find({ isActive: true, isVisible: true })
+            .sort({ displayOrder: 1, priceCents: 1 })
+            .lean();
 
-      return docs.map((doc) => this.mapDocToPlan(doc));
+          if (docs && docs.length > 0) {
+            return docs.map((doc) => this.mapDocToPlan(doc));
+          }
+        }
+      } catch {
+        // Fallback to authoritative static catalog
+      }
+
+      return PLANS_ARRAY.filter(p => p.isActive);
     });
   }
 
@@ -65,32 +84,50 @@ export class SubscriptionService {
       return this.allPlansCache.data;
     }
 
-    if (mongoose.connection.readyState !== 1) {
-      throw ApiError.internal('Subscription plan database is unavailable');
+    await this.ensureDatabaseConnection();
+
+    try {
+      if (mongoose.connection.readyState === 1) {
+        await seedPlansIfEmpty().catch(() => {});
+        const docs = await PlanModel.find()
+          .sort({ displayOrder: 1, priceCents: 1 })
+          .lean();
+
+        if (docs && docs.length > 0) {
+          const plans = docs.map(d => this.mapDocToPlan(d));
+          this.allPlansCache = { data: plans, expiry: now + this.CACHE_TTL_MS };
+          return plans;
+        }
+      }
+    } catch {
+      // Fallback
     }
 
-    await seedPlansIfEmpty();
-    const docs = await PlanModel.find()
-      .sort({ displayOrder: 1, priceCents: 1 })
-      .lean();
-
-    const plans = docs.map(d => this.mapDocToPlan(d));
-    this.allPlansCache = { data: plans, expiry: now + this.CACHE_TTL_MS };
-    return plans;
+    const fallback = PLANS_ARRAY;
+    this.allPlansCache = { data: fallback, expiry: now + this.CACHE_TTL_MS };
+    return fallback;
   }
 
   async getPlanById(id: string): Promise<SubscriptionPlan | undefined> {
     const normalized = id.startsWith('PLAN_') ? id : `PLAN_${id.toUpperCase()}`;
-    if (mongoose.connection.readyState !== 1) {
-      throw ApiError.internal('Subscription plan database is unavailable');
+    await this.ensureDatabaseConnection();
+
+    try {
+      if (mongoose.connection.readyState === 1) {
+        await seedPlansIfEmpty().catch(() => {});
+        const doc = await PlanModel.findOne({
+          $or: [{ planId: id }, { planId: normalized }]
+        }).lean();
+
+        if (doc) {
+          return this.mapDocToPlan(doc);
+        }
+      }
+    } catch {
+      // Fallback
     }
 
-    await seedPlansIfEmpty();
-    const doc = await PlanModel.findOne({
-      $or: [{ planId: id }, { planId: normalized }]
-    }).lean();
-
-    return doc ? this.mapDocToPlan(doc) : undefined;
+    return PLANS_ARRAY.find(p => p.id === id || p.id === normalized);
   }
 
   async createPlan(input: CreatePlanInput, adminId?: string): Promise<SubscriptionPlan> {

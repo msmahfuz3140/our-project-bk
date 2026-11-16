@@ -201,11 +201,22 @@ export class PaymentService {
           });
         } catch (paymentErr: any) {
           lastError = paymentErr;
-          logger.warn('Direct NOWPayments createPayment failed, attempting hosted invoice fallback', {
+          const errMsg = String(paymentErr?.providerBody || paymentErr?.message || '').toLowerCase();
+          logger.warn('Direct NOWPayments createPayment failed', {
             orderId,
             statusCode: paymentErr?.statusCode,
-            message: paymentErr?.message
+            message: paymentErr?.message,
+            providerBody: paymentErr?.providerBody
           });
+
+          // If payment was rejected because the order amount is below provider minimum
+          if (paymentErr?.statusCode === 400 && errMsg.includes('minimal')) {
+            throw new ApiError(
+              400,
+              `NOWPayments minimum deposit limit for ${normalizedPayCurrency} is higher than $${plan.priceUsd}. Please select another cryptocurrency (such as TRX or LTC, which support payments from $0.20) or choose a higher tier plan.`,
+              'PAYMENT_BELOW_MINIMUM'
+            );
+          }
         }
 
         // 2. Also create hosted invoice as alternative checkoutUrl option
@@ -231,6 +242,14 @@ export class PaymentService {
 
         if (!npPayment && !invoice) {
           throw lastError || new NowPaymentsApiError(502, 'NOWPayments was unable to initialize payment');
+        }
+
+        if (!npPayment && (!invoice || !invoice.pay_address)) {
+          throw lastError || new ApiError(
+            400,
+            `Unable to generate a direct deposit address for ${normalizedPayCurrency}. Please select another cryptocurrency (such as TRX or LTC).`,
+            'PAYMENT_DIRECT_UNAVAILABLE'
+          );
         }
 
         if (invoice) {
