@@ -344,11 +344,16 @@ async function run() {
   });
   assert(tempLogin.status === 200, 'temporary password works for login', tempLogin);
   assert(
-    tempLogin.body?.data?.user?.mustChangePassword === true,
-    'login response requires a password change'
+    tempLogin.body?.data?.user?.mustChangePassword === undefined,
+    'login response omits account-state fields from the public payload'
   );
 
   const tempToken = tempLogin.body?.data?.token;
+  const tempMe = await request('/api/v1/auth/me', { token: tempToken });
+  assert(
+    tempMe.body?.data?.mustChangePassword === true,
+    'authenticated session requires a password change'
+  );
 
   console.log('\n[6. Forced password change and old-password rejection]');
   const newPassword = 'NewPrivatePass456!';
@@ -378,8 +383,13 @@ async function run() {
   });
   assert(newLogin.status === 200, 'new password works for login', newLogin);
   assert(
-    newLogin.body?.data?.user?.mustChangePassword === false,
-    'new login no longer requires a password change'
+    newLogin.body?.data?.user?.mustChangePassword === undefined,
+    'new login response omits account-state fields'
+  );
+  const newMe = await request('/api/v1/auth/me', { token: newLogin.body?.data?.token });
+  assert(
+    newMe.body?.data?.mustChangePassword === false,
+    'new session no longer requires a password change'
   );
 
   console.log('\n[7. Password isolation and validation]');

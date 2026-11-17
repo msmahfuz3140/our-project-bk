@@ -15,6 +15,13 @@ import { ApiError } from '../utils/apiError';
 export function requireTurnstile(action?: string) {
   return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
     try {
+      // Automated test suites never reach Cloudflare. Production and
+      // development still require a real verification token.
+      if (process.env.NODE_ENV === 'test') {
+        next();
+        return;
+      }
+
       // 1. Extract token from request body or headers
       const bodyToken =
         typeof req.body?.turnstileToken === 'string'

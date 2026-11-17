@@ -13,8 +13,9 @@ import { performanceMiddleware } from './middleware/performance.middleware';
 import { getHealth } from './controllers/health.controller';
 import { validatePaymentEnvironment } from './config/env';
 import { validateCoreEnvironment } from './config/env';
-import { isProductionRuntime } from './config/env';
 import { logger } from './utils/logger';
+import { ApiError } from './utils/apiError';
+import { isOriginAllowed } from './utils/origin';
 
 export const app = express();
 app.set('trust proxy', 1);
@@ -46,39 +47,25 @@ app.use(helmet());
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-    const allowed = env.CORS_ORIGIN.split(',').map(o => o.trim().replace(/\/$/, ''));
-    const cleanOrigin = origin.replace(/\/$/, '');
-    let hostname = '';
-    try {
-      hostname = new URL(cleanOrigin).hostname.toLowerCase();
-    } catch {
-      return callback(new Error(`CORS policy blocked malformed origin: ${origin}`));
-    }
-
-    const isAllowedHost =
-      hostname === 'accuracy.tools' ||
-      hostname === 'www.accuracy.tools' ||
-      hostname.endsWith('.accuracy.tools') ||
-      hostname === 'rouletteaccuracy.com' ||
-      hostname === 'www.rouletteaccuracy.com' ||
-      hostname.endsWith('.rouletteaccuracy.com') ||
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      (hostname.endsWith('.vercel.app') && (hostname.includes('our-project') || hostname.includes('accuracy')));
-
-    if (
-      allowed.includes(cleanOrigin) ||
-      isAllowedHost ||
-      (!isProductionRuntime && env.NODE_ENV === 'development')
-    ) {
-      return callback(null, true);
-    }
-    return callback(new Error(`CORS policy blocked access from origin: ${origin}`));
+    if (isOriginAllowed(origin)) return callback(null, true);
+    // Never throw here: the cors package would surface the error as a 500.
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'x-nowpayments-sig']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'x-nowpayments-sig'],
+  maxAge: 86400
 }));
+
+// Reject disallowed browser origins with a clean 403 on actual requests.
+app.use('/api', (req, _res, next) => {
+  const origin = req.get('origin');
+  if (origin && !isOriginAllowed(origin)) {
+    next(ApiError.forbidden('Requests from this origin are not allowed.', 'CORS_ORIGIN_REJECTED'));
+    return;
+  }
+  next();
+});
 app.use(express.json({
   limit: '1mb',
   verify: (req: any, _res, buf) => {

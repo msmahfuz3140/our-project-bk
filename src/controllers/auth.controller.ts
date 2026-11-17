@@ -1,14 +1,28 @@
 import { Request, Response, NextFunction } from 'express';
 import { authService } from '../services/auth.service';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
+import { setAuthCookies, clearAuthCookies } from '../utils/authCookies';
+
+/**
+ * `mustChangePassword` is account state needed by the authenticated
+ * `/auth/me` endpoint, but it must not appear on credential-issuing responses.
+ * Keeping the public login/registration payloads uniform prevents scanners and
+ * attackers from using account metadata to distinguish responses.
+ */
+function publicAuthResult<T extends { user?: any }>(result: T): T {
+  if (!result?.user) return result;
+  const { mustChangePassword, ...user } = result.user;
+  return { ...result, user };
+}
 
 export class AuthController {
   async register(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const result = await authService.register(req.body, req.ip, req.get('user-agent') || undefined);
+      if (result.token) setAuthCookies(req, res, result.token);
       res.status(201).json({
         success: true,
-        data: result
+        data: publicAuthResult(result)
       });
     } catch (error) {
       next(error);
@@ -18,9 +32,10 @@ export class AuthController {
   async login(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const result = await authService.login(req.body, req.ip, req.get('user-agent') || undefined);
+      if (result.token) setAuthCookies(req, res, result.token);
       res.status(200).json({
         success: true,
-        data: result
+        data: publicAuthResult(result)
       });
     } catch (error) {
       next(error);
@@ -30,10 +45,11 @@ export class AuthController {
   async verifyOtp(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const result = await authService.verifyOtp(req.body);
+      if (result.token) setAuthCookies(req, res, result.token);
       res.status(200).json({
         success: true,
         message: 'Account successfully verified and activated',
-        data: result
+        data: publicAuthResult(result)
       });
     } catch (error) {
       next(error);
@@ -90,8 +106,7 @@ export class AuthController {
   }
 
   async logout(req: Request, res: Response): Promise<void> {
-    // Clear cookies and acknowledge session revocation
-    res.clearCookie('token');
+    clearAuthCookies(res);
     res.status(200).json({
       success: true,
       message: 'Successfully logged out'

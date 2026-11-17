@@ -86,9 +86,16 @@ export async function requireAuth(
       return;
     }
 
-    if (user.sessionsRevokedAt && decoded.iat && (decoded.iat * 1000) < new Date(user.sessionsRevokedAt).getTime()) {
-      next(ApiError.unauthorized('Session has been revoked by administration. Please log in again.'));
-      return;
+    if (user.sessionsRevokedAt && decoded.iat) {
+      // JWT `iat` has one-second precision. Allow a short grace window so a
+      // token issued immediately after an administrative reset (same second)
+      // is not incorrectly treated as an older, revoked session.
+      const issuedAtMs = decoded.iat * 1000;
+      const revokedAtMs = new Date(user.sessionsRevokedAt).getTime();
+      if (issuedAtMs + 5000 < revokedAtMs) {
+        next(ApiError.unauthorized('Session has been revoked by administration. Please log in again.'));
+        return;
+      }
     }
 
     const activeSub = context.activeSub;

@@ -40,6 +40,30 @@ export function errorHandler(
     return;
   }
 
+  // Handle malformed or oversized request bodies without surfacing a 500
+  const typedError = err as any;
+  if (typedError?.type === 'entity.parse.failed') {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'INVALID_JSON',
+        message: 'Request body contains invalid JSON.'
+      }
+    });
+    return;
+  }
+
+  if (typedError?.type === 'entity.too.large') {
+    res.status(413).json({
+      success: false,
+      error: {
+        code: 'PAYLOAD_TOO_LARGE',
+        message: 'Request body exceeds the allowed size.'
+      }
+    });
+    return;
+  }
+
   // Handle unexpected internal errors
   logger.error('Unhandled Server Error', err, {
     method: req.method,
@@ -58,7 +82,9 @@ export function errorHandler(
       success: false,
       error: {
         code: 'DATABASE_UNAVAILABLE',
-        message: 'Database is currently unreachable. Please add 0.0.0.0/0 in MongoDB Atlas Network Access.'
+        message: isProductionRuntime
+          ? 'Service temporarily unavailable. Please try again later.'
+          : 'Database is currently unreachable. Check the database connection and network allowlist.'
       }
     });
     return;

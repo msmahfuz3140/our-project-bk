@@ -17,32 +17,32 @@ import { requireAuth } from '../middleware/auth.middleware';
 const router = Router();
 
 // Registration with rate limiting & Cloudflare Turnstile CAPTCHA verification
-router.post('/register', rateLimit(5, 15, 'register'), requireTurnstile('register'), validate(RegisterSchema), (req, res, next) => {
+router.post('/register', rateLimit(5, 10, 'register'), requireTurnstile('register'), validate(RegisterSchema), (req, res, next) => {
   authController.register(req, res, next);
 });
 
 // Login with rate limiting & Cloudflare Turnstile CAPTCHA verification
-router.post('/login', rateLimit(10, 15, 'login'), requireTurnstile('login'), validate(LoginSchema), (req, res, next) => {
+router.post('/login', rateLimit(10, 5, 'login'), requireTurnstile('login'), validate(LoginSchema), (req, res, next) => {
   authController.login(req, res, next);
 });
 
 // OTP Verification with rate limiting & Cloudflare Turnstile CAPTCHA verification
-router.post('/verify-otp', rateLimit(10, 15, 'verify'), requireTurnstile('verify_otp'), validate(VerifyOtpSchema), (req, res, next) => {
+router.post('/verify-otp', rateLimit(10, 5, 'verify'), requireTurnstile('verify_otp'), validate(VerifyOtpSchema), (req, res, next) => {
   authController.verifyOtp(req, res, next);
 });
 
-// OTP Resend (3 attempts per 15 minutes)
-router.post('/resend-otp', rateLimit(3, 15, 'resend'), validate(ResendOtpSchema), (req, res, next) => {
+// OTP Resend (3 attempts per 5 minutes)
+router.post('/resend-otp', rateLimit(3, 5, 'resend'), validate(ResendOtpSchema), (req, res, next) => {
   authController.resendOtp(req, res, next);
 });
 
 // Forgot Password Request with rate limiting & Cloudflare Turnstile CAPTCHA verification
-router.post('/forgot-password', rateLimit(5, 15, 'forgot'), requireTurnstile('forgot_password'), validate(ForgotPasswordSchema), (req, res, next) => {
+router.post('/forgot-password', rateLimit(5, 10, 'forgot'), requireTurnstile('forgot_password'), validate(ForgotPasswordSchema), (req, res, next) => {
   authController.forgotPassword(req, res, next);
 });
 
 // Password Reset with verified OTP & Cloudflare Turnstile CAPTCHA verification
-router.post('/reset-password', rateLimit(5, 15, 'reset'), requireTurnstile('reset_password'), validate(ResetPasswordSchema), (req, res, next) => {
+router.post('/reset-password', rateLimit(5, 5, 'reset'), requireTurnstile('reset_password'), validate(ResetPasswordSchema), (req, res, next) => {
   authController.resetPassword(req, res, next);
 });
 

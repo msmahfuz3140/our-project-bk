@@ -54,9 +54,10 @@ export function rateLimit(limit: number, windowMinutes: number, keyPrefix = 'rat
 
     if (!allowed) {
       res.setHeader('Retry-After', retryAfterSeconds);
-      next(ApiError.badRequest(
+      res.setHeader('X-RateLimit-Retry-After', retryAfterSeconds);
+      next(ApiError.tooManyRequests(
         `Too many requests. Please wait ${retryAfterSeconds} seconds before trying again.`,
-        'RATE_LIMIT_EXCEEDED'
+        retryAfterSeconds
       ));
       return;
     }

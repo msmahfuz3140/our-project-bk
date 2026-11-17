@@ -30,6 +30,14 @@ import { logger } from '../utils/logger';
 import { cacheKeys, memoryCache } from '../utils/cache';
 
 export class AuthService {
+  /**
+   * A valid bcrypt hash used to equalize the cost of a login attempt for an
+   * unknown identifier, preventing account existence from being inferred by
+   * response timing.
+   */
+  private static readonly DUMMY_PASSWORD_HASH =
+    '$2b$12$C4Cpxafn.IjR4DqM9oKE1O50kzNTJqA1/HB/dnK86mUQFcRFhyN2G';
+
   private hashOtp(code: string, target: string): string {
     return crypto
       .createHmac('sha256', env.JWT_SECRET)
@@ -242,6 +250,14 @@ export class AuthService {
     }
 
     const user = await userRepository.findByIdentifier(lookupTarget, cleanId);
+
+    // Always perform a bcrypt comparison, even for unknown identifiers, so
+    // response timing does not reveal whether an account exists.
+    const isMatch = await comparePassword(
+      password,
+      user?.passwordHash || AuthService.DUMMY_PASSWORD_HASH
+    );
+
     if (!user) {
       await this.logSecurityEvent({
         email: cleanId,
@@ -254,7 +270,6 @@ export class AuthService {
       throw ApiError.unauthorized('Invalid email/phone or password');
     }
 
-    const isMatch = await comparePassword(password, user.passwordHash);
     if (!isMatch) {
       await this.logSecurityEvent({
         userId: user._id,
@@ -425,9 +440,13 @@ export class AuthService {
     });
 
     if (cleanTarget.includes('@')) {
-      await emailService.sendVerificationOtp(cleanTarget, rawOtp);
+      await emailService.sendVerificationOtp(cleanTarget, rawOtp).catch((error: any) => {
+        logger.error('Verification email delivery failed', { error: error?.message });
+      });
     } else {
-      await smsService.sendVerificationOtp(cleanTarget, rawOtp);
+      await smsService.sendVerificationOtp(cleanTarget, rawOtp).catch((error: any) => {
+        logger.error('Verification SMS delivery failed', { error: error?.message });
+      });
     }
 
     return { success: true, cooldownSeconds: 60 };
@@ -463,9 +482,13 @@ export class AuthService {
     });
 
     if (cleanTarget.includes('@')) {
-      await emailService.sendPasswordResetOtp(cleanTarget, rawOtp);
+      await emailService.sendPasswordResetOtp(cleanTarget, rawOtp).catch((error: any) => {
+        logger.error('Password reset email delivery failed', { error: error?.message });
+      });
     } else {
-      await smsService.sendPasswordResetOtp(cleanTarget, rawOtp);
+      await smsService.sendPasswordResetOtp(cleanTarget, rawOtp).catch((error: any) => {
+        logger.error('Password reset SMS delivery failed', { error: error?.message });
+      });
     }
 
     return { message: 'If an account exists with this email or phone number, a verification code has been dispatched.' };

@@ -29,6 +29,10 @@ export class ApiError extends Error {
     return new ApiError(404, message, code);
   }
 
+  static tooManyRequests(message: string, retryAfterSeconds?: number): ApiError {
+    return new ApiError(429, message, 'RATE_LIMIT_EXCEEDED', { retryAfterSeconds });
+  }
+
   static conflict(message: string, code = 'CONFLICT'): ApiError {
     return new ApiError(409, message, code);
   }
