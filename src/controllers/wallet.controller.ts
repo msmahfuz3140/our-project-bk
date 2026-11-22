@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { walletService } from '../services/wallet.service';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { ApiError } from '../utils/apiError';
+import { publicWithdrawalMethods } from '../shared/withdrawalMethods';
 
 function parseAmountCents(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
@@ -54,21 +55,36 @@ export class WalletController {
 
   async requestWithdrawal(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { amountUsd, amountCents, walletAddress, network, idempotencyKey } = req.body || {};
-      if (!walletAddress || !network) {
-        throw ApiError.badRequest('Receiving wallet address and network are required');
+      const { amountUsd, amountCents, methodId, walletAddress, network, idempotencyKey } = req.body || {};
+      if (!walletAddress) {
+        throw ApiError.badRequest('A receiving wallet address is required');
+      }
+      if (!methodId && !network) {
+        throw ApiError.badRequest('Select a supported cryptocurrency and network');
       }
       const withdrawal = await walletService.createWithdrawal(req.user!.id, {
         amountUsd: amountUsd !== undefined ? Number(amountUsd) : undefined,
         amountCents: amountCents !== undefined ? Number(amountCents) : parseAmountCents(amountUsd),
+        methodId: methodId ? String(methodId) : undefined,
         walletAddress: String(walletAddress),
-        network: String(network),
+        network: network ? String(network) : undefined,
         idempotencyKey: idempotencyKey ? String(idempotencyKey) : undefined
       });
       res.status(201).json({
         success: true,
         message: 'Withdrawal request submitted for admin review',
         data: withdrawal
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async getWithdrawalMethods(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      res.status(200).json({
+        success: true,
+        data: { methods: publicWithdrawalMethods() }
       });
     } catch (error) {
       next(error);

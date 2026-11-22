@@ -8,9 +8,10 @@ const router = Router();
 router.use(requireAuth);
 
 router.get('/me', (req, res, next) => walletController.getMyWallet(req, res, next));
+router.get('/withdrawal-methods', (req, res, next) => walletController.getWithdrawalMethods(req, res, next));
 router.get('/transactions', (req, res, next) => walletController.getMyTransactions(req, res, next));
 router.get('/withdrawals', (req, res, next) => walletController.getMyWithdrawals(req, res, next));
-router.post('/withdrawals', rateLimit(10, 15, 'wallet_withdrawal'), (req, res, next) =>
+router.post('/withdrawals', rateLimit(5, 30, 'wallet_withdrawal'), (req, res, next) =>
   walletController.requestWithdrawal(req, res, next)
 );
 

@@ -6,6 +6,8 @@ import { FinancialLedgerModel } from '../models/FinancialLedger';
 import { ReferralCommissionModel } from '../models/ReferralCommission';
 import { WalletModel } from '../models/Wallet';
 import { WithdrawalRequestModel } from '../models/WithdrawalRequest';
+import { AdminTwoFactorModel } from '../models/AdminTwoFactor';
+import { AdminRecoveryCodeModel } from '../models/AdminRecoveryCode';
 import { AuditLogModel, IAuditLog, AuditActionType } from '../models/AuditLog';
 import { DualApprovalModel, IDualApproval, DualApprovalActionType } from '../models/DualApproval';
 import { UserRole } from '../shared/roles';
@@ -19,6 +21,8 @@ import { memoryCache } from '../utils/cache';
 import { cacheKeys } from '../utils/cache';
 import { financialService } from './financial.service';
 import { normalizeCommissionRate } from './commission.service';
+import { sendAccountStatusNotification } from './accountNotification.service';
+import { transactionalEmailService } from './transactionalEmail.service';
 
 export interface AdminDashboardMetrics {
   totalRegisteredUsers: number;
@@ -460,7 +464,7 @@ export class AdminService {
       throw ApiError.notFound(`User ${userId} does not exist`);
     }
 
-    const [subscriptions, payments, commissions, auditLogs, allPlans, wallet, referralCommissions, withdrawals, referredUsersCount] =
+    const [subscriptions, payments, commissions, auditLogs, allPlans, wallet, referralCommissions, withdrawals, referredUsersCount, emailNotifications, adminTwoFactor, adminRecoveryCodesRemaining] =
       await Promise.all([
         SubscriptionModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
         PaymentModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
@@ -478,7 +482,15 @@ export class AdminService {
           .limit(100)
           .lean(),
         WithdrawalRequestModel.find({ userId: user._id }).sort({ createdAt: -1 }).limit(100).lean(),
-        UserModel.countDocuments({ referredBy: user._id, isDeleted: { $ne: true } })
+        UserModel.countDocuments({ referredBy: user._id, isDeleted: { $ne: true } }),
+        transactionalEmailService.getRecentForUser(user._id.toString(), 25),
+        AdminTwoFactorModel.findOne({ userId: user._id })
+          .select('enabled lastVerifiedAt lockedUntil recoveryCodesGeneratedAt')
+          .lean(),
+        AdminRecoveryCodeModel.countDocuments({
+          userId: user._id,
+          usedAt: { $exists: false }
+        })
       ]);
 
     const planMap = new Map<string, any>();
@@ -519,6 +531,14 @@ export class AdminService {
         totalWithdrawnCents: 0
       },
       withdrawals,
+      emailNotifications,
+      adminTwoFactor: {
+        enabled: Boolean((adminTwoFactor as any)?.enabled),
+        lastVerifiedAt: (adminTwoFactor as any)?.lastVerifiedAt || null,
+        lockedUntil: (adminTwoFactor as any)?.lockedUntil || null,
+        recoveryCodesGeneratedAt: (adminTwoFactor as any)?.recoveryCodesGeneratedAt || null,
+        recoveryCodesRemaining: adminRecoveryCodesRemaining
+      },
       auditLogs
     };
   }
@@ -588,7 +608,14 @@ export class AdminService {
       user.sessionsRevokedAt = new Date();
       passwordChanged = true;
     }
-    if (input.isEmailVerified !== undefined) user.isEmailVerified = input.isEmailVerified;
+    if (input.isEmailVerified !== undefined) {
+      user.isEmailVerified = input.isEmailVerified;
+      if (input.isEmailVerified && !user.emailVerifiedAt) {
+        user.emailVerifiedAt = new Date();
+      } else if (!input.isEmailVerified) {
+        user.emailVerifiedAt = undefined;
+      }
+    }
     if (input.isPhoneVerified !== undefined) user.isPhoneVerified = input.isPhoneVerified;
     if (input.isActive !== undefined) user.isActive = input.isActive;
     if (input.moderatorNotes !== undefined) user.moderatorNotes = input.moderatorNotes;
@@ -710,6 +737,14 @@ export class AdminService {
       throw ApiError.badRequest('You cannot block or suspend your own active administrator account.');
     }
 
+    // Peer protection: a Main Admin cannot directly block or suspend another
+    // Main Admin. High-risk governance changes must go through dual approval.
+    if (user.role === UserRole.SUPER_ADMIN && action !== 'UNBLOCK') {
+      throw ApiError.badRequest(
+        'Super Admin accounts cannot be blocked or suspended directly. Use the dual-approval governance workflow.'
+      );
+    }
+
     const previousStatus = user.accountStatus;
     const now = new Date();
 
@@ -753,6 +788,14 @@ export class AdminService {
         status: user.accountStatus,
         suspendedUntil: user.suspendedUntil
       }
+    });
+
+    await sendAccountStatusNotification({
+      user,
+      action,
+      previousStatus,
+      reason,
+      effectiveAt: now
     });
 
     return user;

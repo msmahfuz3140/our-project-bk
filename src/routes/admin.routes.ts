@@ -5,7 +5,7 @@ import { adminSettingsController } from '../controllers/adminSettings.controller
 import { financialController } from '../controllers/financial.controller';
 import { systemController } from '../controllers/system.controller';
 import { walletController } from '../controllers/wallet.controller';
-import { requireAuth, requireRole } from '../middleware/auth.middleware';
+import { requireAuth, requireRole, requireAdmin2FA } from '../middleware/auth.middleware';
 import { UserRole } from '../shared/roles';
 
 const router = Router();
@@ -13,6 +13,7 @@ const router = Router();
 // Enforce strict server-side authorization for ALL admin endpoints
 router.use(requireAuth);
 router.use(requireRole(UserRole.SUPER_ADMIN));
+router.use(requireAdmin2FA);
 
 // Dashboard Metrics
 router.get('/dashboard-metrics', (req, res, next) =>
@@ -259,6 +260,14 @@ router.get('/security/overview', (req, res, next) => adminExtendedController.get
 router.get('/security/alerts', (req, res, next) => adminExtendedController.getSecurityAlerts(req, res, next));
 router.post('/security/revoke-sessions/:userId', (req, res, next) => adminExtendedController.revokeUserSessions(req, res, next));
 
+// Owner/super-admin recovery procedure for a lost authenticator
+router.get('/security/2fa/status/:userId', (req, res, next) =>
+  adminController.getAdminTwoFactorStatusForUser(req as any, res, next)
+);
+router.post('/security/2fa/reset/:userId', (req, res, next) =>
+  adminController.resetAdminTwoFactor(req as any, res, next)
+);
+
 // Roulette Tool Management & Telemetry
 router.get('/tool/telemetry', (req, res, next) => adminExtendedController.getToolTelemetry(req, res, next));
 
@@ -296,5 +305,11 @@ router.post('/ai-assistant/query', (req, res, next) => adminExtendedController.q
 // Notifications Telemetry & Targeted Delivery
 router.get('/notifications/metrics', (req, res, next) => adminExtendedController.getNotificationMetrics(req, res, next));
 router.post('/notifications/targeted', (req, res, next) => adminExtendedController.sendTargetedNotification(req, res, next));
+
+// Transactional email delivery monitoring & retry
+router.get('/notifications/email/metrics', (req, res, next) => adminExtendedController.getEmailNotificationMetrics(req, res, next));
+router.get('/notifications/email', (req, res, next) => adminExtendedController.listEmailNotifications(req, res, next));
+router.get('/notifications/email/:id', (req, res, next) => adminExtendedController.getEmailNotificationDetails(req, res, next));
+router.post('/notifications/email/:id/retry', (req, res, next) => adminExtendedController.retryEmailNotification(req, res, next));
 
 export const adminRoutes = router;

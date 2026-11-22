@@ -15,6 +15,7 @@ import { AuditLogModel } from '../models/AuditLog';
 import { supportTicketService } from '../services/supportTicket.service';
 import { securityService } from '../services/security.service';
 import { toolAdminService } from '../services/toolAdmin.service';
+import { dsProxyService } from '../services/dsProxy.service';
 import { aiAssistantService } from '../services/aiAssistant.service';
 import { adminService } from '../services/admin.service';
 import { UserRole } from '../shared/roles';
@@ -44,6 +45,36 @@ async function runPhase9Tests() {
 
   await setupTestDb();
   await seedPlansIfEmpty();
+
+  // The admin telemetry suite must not depend on a live third-party provider.
+  const settings = await ToolSettingsModel.getSettings();
+  settings.dsApiUrl = 'https://ds-provider.test';
+  settings.dsApiKey = 'test-provider-key-phase9';
+  settings.dsApiKeyLast4 = 'ase9';
+  await settings.save();
+
+  const originalGetTables = dsProxyService.getTables.bind(dsProxyService);
+  (dsProxyService as any).getTables = async () => ({
+    data: {
+      total: 6,
+      tables: Array.from({ length: 6 }).map((_, index) => ({
+        id: `table-${index + 1}`,
+        name: `Test Table ${index + 1}`,
+        provider: 'TEST',
+        dealer: 'Dealer',
+        spins: [1, 2, 3],
+        spin_count: 3,
+        accuracy_cw: 60,
+        accuracy_ccw: 55,
+        best_accuracy: 60,
+        best_direction: 'CW',
+        wl_last_10: ['W', 'L'],
+        pattern: 'STEADY',
+        ready: true,
+        updated_at: new Date().toISOString()
+      }))
+    }
+  });
 
   let passed = 0;
   const pass = (name: string) => {
@@ -210,7 +241,7 @@ async function runPhase9Tests() {
     assert.ok(toolTelemetry.strategyDistribution.TARGET !== undefined, 'Target strategy monitored');
     assert.ok(toolTelemetry.strategyDistribution.DEALER_SIGNATURE !== undefined, 'Dealer signature rhythm monitored');
     assert.ok(
-      toolTelemetry.telemetryNotice.disclaimer.includes('no outcome is guaranteed'),
+      toolTelemetry.telemetryNotice.disclaimer.toLowerCase().includes('no outcome is guaranteed'),
       'Regulatory disclosure strictly rejects fabricated win guarantees'
     );
     pass('Tool telemetry aggregates live table feeds without fabricated statistics');
@@ -390,6 +421,7 @@ async function runPhase9Tests() {
     console.log(`  PHASE 9 TEST RESULTS: ${passed} PASSED, 0 FAILED`);
     console.log('=============================================\n');
   } finally {
+    (dsProxyService as any).getTables = originalGetTables;
     await teardownTestDb();
   }
 }

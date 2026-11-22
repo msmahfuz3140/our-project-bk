@@ -3,9 +3,12 @@ import { env } from './config/env';
 import { db } from './database/connection';
 import { ensurePaymentIndexes } from './database/ensureIndexes';
 import { ensureSecurityBaseline } from './database/ensureIndexes';
+import { ensureTrustAndPayoutMigration } from './database/ensureIndexes';
+import { ensureAdminTwoFactorRolloutMarker } from './database/ensureIndexes';
 import { initializeAuthoritativeAdmin } from './database/initAdmin';
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job';
 import { startPaymentReconciliationJob } from './jobs/paymentReconciliation.job';
+import { startEmailRetryJob } from './jobs/emailRetry.job';
 import { logger } from './utils/logger';
 
 async function bootstrap() {
@@ -26,6 +29,14 @@ async function bootstrap() {
     logger.error('Warning: could not run security baseline migration', err);
   });
 
+  await ensureTrustAndPayoutMigration().catch((err) => {
+    logger.error('Warning: could not run referral/verification/payout migration', err);
+  });
+
+  await ensureAdminTwoFactorRolloutMarker().catch((err) => {
+    logger.error('Warning: could not record admin 2FA rollout marker', err);
+  });
+
   // Ensure authoritative SUPER_ADMIN exists in MongoDB and old demo accounts are removed
   await initializeAuthoritativeAdmin().catch((err) => {
     logger.error('Warning: could not complete admin initialization', err);
@@ -36,6 +47,7 @@ async function bootstrap() {
   if (env.NODE_ENV !== 'test') {
     startSubscriptionExpiryJob();
     startPaymentReconciliationJob();
+    startEmailRetryJob();
   }
 
   const server = app.listen(env.PORT, () => {

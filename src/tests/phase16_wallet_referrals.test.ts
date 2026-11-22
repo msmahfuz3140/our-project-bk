@@ -267,7 +267,7 @@ async function run() {
 
   const withdrawal = await walletService.createWithdrawal(withdrawer._id.toString(), {
     amountCents: 2000,
-    walletAddress: 'TWalletAddressPhase16Testing123456',
+    walletAddress: 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf',
     network: 'USDT_TRC20',
     idempotencyKey: 'phase16-withdrawal-1'
   });
@@ -278,7 +278,7 @@ async function run() {
 
   const duplicateWithdrawal = await walletService.createWithdrawal(withdrawer._id.toString(), {
     amountCents: 2000,
-    walletAddress: 'TWalletAddressPhase16Testing123456',
+    walletAddress: 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf',
     network: 'USDT_TRC20',
     idempotencyKey: 'phase16-withdrawal-1'
   });
@@ -314,7 +314,7 @@ async function run() {
   console.log('\n[7. Withdrawal approval and paid completion]');
   const approvedWithdrawal = await walletService.createWithdrawal(withdrawer._id.toString(), {
     amountCents: 3000,
-    walletAddress: 'TWalletAddressPhase16Testing123456',
+    walletAddress: 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf',
     network: 'USDT_TRC20',
     idempotencyKey: 'phase16-withdrawal-2'
   });
@@ -364,13 +364,13 @@ async function run() {
   const results = await Promise.allSettled([
     walletService.createWithdrawal(concurrentUser._id.toString(), {
       amountCents: 2000,
-      walletAddress: 'ConcurrentWalletAddressOne123',
+      walletAddress: '1BoatSLRHtKNngkdXEeobR76b53LETtpyT',
       network: 'BTC',
       idempotencyKey: 'phase16-concurrent-1'
     }),
     walletService.createWithdrawal(concurrentUser._id.toString(), {
       amountCents: 2000,
-      walletAddress: 'ConcurrentWalletAddressTwo456',
+      walletAddress: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
       network: 'BTC',
       idempotencyKey: 'phase16-concurrent-2'
     })

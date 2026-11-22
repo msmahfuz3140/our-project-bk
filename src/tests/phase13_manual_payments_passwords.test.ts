@@ -6,6 +6,7 @@ import { env } from '../config/env';
 import { nowPaymentsService } from '../services/nowpayments.service';
 import { paymentService } from '../services/payment.service';
 import { UserModel } from '../models/User';
+import { AdminTwoFactorModel } from '../models/AdminTwoFactor';
 import { PaymentModel } from '../models/Payment';
 import { SubscriptionModel } from '../models/Subscription';
 import { AuditLogModel } from '../models/AuditLog';
@@ -30,7 +31,7 @@ function assert(condition: boolean, testName: string, detail?: unknown) {
 }
 
 function tokenFor(userId: string): string {
-  return jwt.sign({ userId }, env.JWT_SECRET, { expiresIn: '1h' });
+  return jwt.sign({ userId, scope: 'access', amr: ['pwd', 'totp'] }, env.JWT_SECRET, { expiresIn: '1h' });
 }
 
 async function request(
@@ -74,6 +75,7 @@ async function run() {
     isEmailVerified: true,
     isActive: true
   });
+  await AdminTwoFactorModel.create({ userId: admin._id, enabled: true });
 
   const buyer = await UserModel.create({
     name: 'Manual Buyer',

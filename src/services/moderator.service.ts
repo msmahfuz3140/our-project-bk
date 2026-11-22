@@ -12,6 +12,7 @@ import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import { ReferralClickModel } from '../models/ReferralClick';
 import { cacheKeys, memoryCache } from '../utils/cache';
+import { sendAccountStatusNotification } from './accountNotification.service';
 
 export interface CreateModeratorInput {
   name: string;
@@ -464,6 +465,19 @@ export class ModeratorService {
     });
 
     logger.info(`Main Admin ${adminEmail} changed Moderator ${moderator.email} status to ${status}. Reason: ${reason}`);
+
+    await sendAccountStatusNotification({
+      user: moderator,
+      action:
+        status === AccountStatus.BLOCKED
+          ? 'BLOCK'
+          : status === AccountStatus.SUSPENDED
+            ? 'SUSPEND'
+            : 'UNBLOCK',
+      previousStatus: prevStatus,
+      reason,
+      effectiveAt: moderator.statusChangedAt
+    });
 
     return moderator;
   }

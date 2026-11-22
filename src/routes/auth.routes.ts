@@ -12,7 +12,8 @@ import {
   ResetPasswordSchema,
   ChangePasswordSchema
 } from '../shared/auth';
-import { requireAuth } from '../middleware/auth.middleware';
+import { requireAuth, requireRole, requireAdmin2FA } from '../middleware/auth.middleware';
+import { UserRole } from '../shared/roles';
 
 const router = Router();
 
@@ -31,10 +32,63 @@ router.post('/verify-otp', rateLimit(10, 5, 'verify'), requireTurnstile('verify_
   authController.verifyOtp(req, res, next);
 });
 
-// OTP Resend (3 attempts per 5 minutes)
+// OTP resend (3 attempts per 5 minutes)
 router.post('/resend-otp', rateLimit(3, 5, 'resend'), validate(ResendOtpSchema), (req, res, next) => {
   authController.resendOtp(req, res, next);
 });
+
+// ---------------------------------------------------------------------------
+// Mandatory Admin Panel TOTP 2FA
+// ---------------------------------------------------------------------------
+// Pre-authentication challenge verification. No full session exists before
+// this succeeds; the short-lived challenge token is not a session credential.
+router.post('/admin-2fa/verify', rateLimit(10, 5, 'admin_2fa_verify'), (req, res, next) => {
+  authController.verifyAdminTwoFactor(req, res, next);
+});
+
+router.get(
+  '/admin-2fa/status',
+  requireAuth,
+  requireRole(UserRole.SUPER_ADMIN),
+  requireAdmin2FA,
+  (req, res, next) => authController.getAdminTwoFactorStatus(req as any, res, next)
+);
+
+router.post(
+  '/admin-2fa/recovery-codes/regenerate',
+  rateLimit(10, 15, 'admin_2fa_recovery'),
+  requireAuth,
+  requireRole(UserRole.SUPER_ADMIN),
+  requireAdmin2FA,
+  (req, res, next) => authController.regenerateAdminRecoveryCodes(req as any, res, next)
+);
+
+router.post(
+  '/admin-2fa/replace/start',
+  rateLimit(10, 15, 'admin_2fa_replace'),
+  requireAuth,
+  requireRole(UserRole.SUPER_ADMIN),
+  requireAdmin2FA,
+  (req, res, next) => authController.startAdminTwoFactorReplacement(req as any, res, next)
+);
+
+router.post(
+  '/admin-2fa/replace/verify',
+  rateLimit(10, 5, 'admin_2fa_replace_verify'),
+  requireAuth,
+  requireRole(UserRole.SUPER_ADMIN),
+  requireAdmin2FA,
+  (req, res, next) => authController.verifyAdminTwoFactorReplacement(req as any, res, next)
+);
+
+router.post(
+  '/admin-2fa/disable',
+  rateLimit(5, 15, 'admin_2fa_disable'),
+  requireAuth,
+  requireRole(UserRole.SUPER_ADMIN),
+  requireAdmin2FA,
+  (req, res, next) => authController.disableAdminTwoFactor(req as any, res, next)
+);
 
 // Forgot Password Request with rate limiting & Cloudflare Turnstile CAPTCHA verification
 router.post('/forgot-password', rateLimit(5, 10, 'forgot'), requireTurnstile('forgot_password'), validate(ForgotPasswordSchema), (req, res, next) => {

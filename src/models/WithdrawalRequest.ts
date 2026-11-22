@@ -8,6 +8,8 @@ export interface IWithdrawalRequest extends Document {
   userId: mongoose.Types.ObjectId;
   amountCents: number;
   currency: string;
+  withdrawalCurrency?: string;
+  networkId?: string;
   walletAddress: string;
   network: string;
   status: WithdrawalStatus;
@@ -53,6 +55,18 @@ const WithdrawalRequestSchema = new Schema<IWithdrawalRequest>(
       type: String,
       default: 'USD',
       required: true
+    },
+    withdrawalCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 20
+    },
+    networkId: {
+      type: String,
+      trim: true,
+      maxlength: 40,
+      index: true
     },
     walletAddress: {
       type: String,

@@ -7,6 +7,7 @@ import { authService } from '../services/auth.service';
 import { websiteSettingsService } from '../services/websiteSettings.service';
 import { ensureSecurityBaseline } from '../database/ensureIndexes';
 import { UserModel } from '../models/User';
+import { AdminTwoFactorModel } from '../models/AdminTwoFactor';
 import { SubscriptionModel } from '../models/Subscription';
 import { PaymentModel } from '../models/Payment';
 import { ContactMessageModel } from '../models/ContactMessage';
@@ -34,7 +35,7 @@ function assert(condition: boolean, name: string, detail?: unknown) {
 }
 
 function tokenFor(userId: string): string {
-  return jwt.sign({ userId }, env.JWT_SECRET, { expiresIn: '1h' });
+  return jwt.sign({ userId, scope: 'access', amr: ['pwd', 'totp'] }, env.JWT_SECRET, { expiresIn: '1h' });
 }
 
 async function get(path: string, token?: string, headers?: Record<string, string>) {
@@ -79,6 +80,7 @@ async function run() {
     isEmailVerified: true,
     isActive: true
   });
+  await AdminTwoFactorModel.create({ userId: superAdmin._id, enabled: true });
 
   const member = await UserModel.create({
     name: 'Cache Member',

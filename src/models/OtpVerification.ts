@@ -4,7 +4,7 @@ import { OtpPurpose } from '../shared/auth';
 export interface IOtpVerification extends Document {
   target: string; // email or normalized phone
   codeHash: string; // SHA-256 / hashed code for secure storage
-  rawCodeDev?: string; // Only stored in development mode for automated tests
+  rawCodeDev?: string; // Only stored in NODE_ENV=test for automated tests
   purpose: OtpPurpose;
   expiresAt: Date;
   lastSentAt: Date;

@@ -1,5 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { adminService } from '../services/admin.service';
+import { adminTwoFactorService } from '../services/adminTwoFactor.service';
+import { UserModel } from '../models/User';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { ApiError } from '../utils/apiError';
 
@@ -308,6 +310,66 @@ export class AdminController {
       res.status(201).json({
         success: true,
         data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async resetAdminTwoFactor(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const targetUserId = String(req.params.userId || '');
+      const reason = String(req.body?.reason || '').trim();
+      const actorCode = String(req.body?.currentTotpCode || req.body?.code || '').trim();
+      if (!actorCode) {
+        throw ApiError.badRequest(
+          'Enter your own current authenticator code to authorize this recovery action.',
+          'ADMIN_2FA_REAUTH_REQUIRED'
+        );
+      }
+      if (!reason) {
+        throw ApiError.badRequest('A clear recovery reason is required.', 'ADMIN_2FA_REASON_REQUIRED');
+      }
+
+      const actor = await UserModel.findById(req.user!.id);
+      if (!actor) throw ApiError.unauthorized('Administrator account not found.');
+
+      const result = await adminTwoFactorService.resetByOwner({
+        actor,
+        targetUserId,
+        actorCode,
+        reason,
+        ip: req.ip
+      });
+
+      res.status(200).json({
+        success: true,
+        message:
+          'The target administrator 2FA was reset and an audit record was created. They must set up 2FA again on their next login.',
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async getAdminTwoFactorStatusForUser(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const targetUserId = String(req.params.userId || '');
+      if (!targetUserId) throw ApiError.badRequest('Target user id is required.');
+      const target = await UserModel.findById(targetUserId).select('role email name');
+      if (!target || target.role !== 'SUPER_ADMIN') {
+        throw ApiError.notFound('Target administrator was not found.');
+      }
+      const status = await adminTwoFactorService.getStatus(targetUserId);
+      res.status(200).json({
+        success: true,
+        data: {
+          targetUserId,
+          targetEmail: target.email,
+          targetName: target.name,
+          ...status
+        }
       });
     } catch (error) {
       next(error);

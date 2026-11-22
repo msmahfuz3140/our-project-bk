@@ -54,10 +54,17 @@ export class CommissionService {
     if (commissionType === 'ONE_TIME') {
       const existingOneTime = await ReferralCommissionModel.findOne({
         referredUserId: payment.userId,
-        commissionType: 'ONE_TIME',
-        status: { $ne: 'REVERSED' }
-      }).select('_id');
-      if (existingOneTime) return null;
+        commissionType: 'ONE_TIME'
+      });
+      if (existingOneTime) {
+        // A reversed one-time commission is terminal. A later purchase by the
+        // same referred customer must not silently re-credit it; an admin
+        // adjustment is required for an exceptional correction.
+        if (existingOneTime.status === 'REVERSED') return null;
+        if (existingOneTime.status === 'CREDITED' && existingOneTime.walletTransactionId) {
+          return existingOneTime;
+        }
+      }
     }
 
     const idempotencyKey =
@@ -70,41 +77,65 @@ export class CommissionService {
     const amountCents = Math.round(purchaseCents * rate);
     if (amountCents <= 0) return null;
 
-    const commission = await ReferralCommissionModel.findOneAndUpdate(
-      { idempotencyKey },
-      {
-        $setOnInsert: {
-          moderatorId: referrer._id,
-          referredUserId: payment.userId,
-          subscriptionId: subscriptionId
-            ? new mongoose.Types.ObjectId(subscriptionId)
-            : payment.subscriptionId,
-          paymentId: payment._id,
-          purchaseId: payment.orderId,
-          subscriptionPlan: payment.planId,
-          originalPurchaseAmount: payment.priceAmount,
-          commissionableAmount: payment.priceAmount,
-          commissionRate: rate,
-          amountUsd: amountCents / 100,
-          referrerRole: referrer.role,
-          commissionType,
-          idempotencyKey,
-          status: 'PENDING',
-          notes:
-            commissionType === 'ONE_TIME'
-              ? 'One-time normal-user referral commission for the referred user’s first eligible purchase'
-              : 'Lifetime moderator referral commission'
-        }
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    // A one-time commission may already exist in a PENDING/APPROVED state if a
+    // previous wallet credit failed. Reuse that exact record so the retry is
+    // idempotent and never creates a second one-time commission.
+    let commission: IReferralCommission | null = null;
+    if (commissionType === 'ONE_TIME') {
+      commission = await ReferralCommissionModel.findOne({
+        referredUserId: payment.userId,
+        commissionType: 'ONE_TIME',
+        status: { $ne: 'REVERSED' }
+      });
+    }
+
+    if (!commission) {
+      commission = await ReferralCommissionModel.findOneAndUpdate(
+        { idempotencyKey },
+        {
+          $setOnInsert: {
+            moderatorId: referrer._id,
+            referredUserId: payment.userId,
+            subscriptionId: subscriptionId
+              ? new mongoose.Types.ObjectId(subscriptionId)
+              : payment.subscriptionId,
+            paymentId: payment._id,
+            purchaseId: payment.orderId,
+            subscriptionPlan: payment.planId,
+            originalPurchaseAmount: payment.priceAmount,
+            commissionableAmount: payment.priceAmount,
+            commissionRate: rate,
+            amountUsd: amountCents / 100,
+            referrerRole: referrer.role,
+            commissionType,
+            idempotencyKey,
+            status: 'PENDING',
+            notes:
+              commissionType === 'ONE_TIME'
+                ? 'One-time normal-user referral commission for the referred user’s first eligible purchase'
+                : 'Lifetime moderator referral commission'
+          }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    }
 
     if (!commission) return null;
 
-    // A reversed one-time commission is terminal. A later purchase by the same
-    // referred customer must not silently re-credit it; an admin adjustment is
-    // required for an exceptional correction.
+    // A reversed one-time commission is terminal.
     if (commission.status === 'REVERSED') return null;
+
+    // Never credit a wallet that does not match the permanent referral
+    // relationship. A mismatch requires manual financial review.
+    if (commission.moderatorId.toString() !== referrer._id.toString()) {
+      logger.error('Referral commission referrer mismatch blocked', {
+        commissionId: commission._id.toString(),
+        storedReferrerId: commission.moderatorId.toString(),
+        relationshipReferrerId: referrer._id.toString(),
+        orderId: payment.orderId
+      });
+      return null;
+    }
 
     // A second worker may have created the same commission; wallet credit is
     // independently idempotent, and already-credited records are returned.

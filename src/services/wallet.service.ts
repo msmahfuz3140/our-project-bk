@@ -14,6 +14,17 @@ import { ApiError } from '../utils/apiError';
 import { env } from '../config/env';
 import { generateRandomString } from '../utils/crypto';
 import { notificationService } from './notification.service';
+import { transactionalEmailService } from './transactionalEmail.service';
+import {
+  withdrawalSubmitted,
+  withdrawalApproved,
+  withdrawalPaid,
+  withdrawalRejected
+} from './emailTemplates';
+import {
+  resolveWithdrawalMethod,
+  validateWithdrawalAddress
+} from '../shared/withdrawalMethods';
 import { logger } from '../utils/logger';
 
 function nowId(prefix: string): string {
@@ -249,21 +260,36 @@ export class WalletService {
     const existing = await WalletTransactionModel.findOne({ idempotencyKey });
     if (existing?.status === 'COMPLETED') return existing;
 
-    const transaction = await WalletTransactionModel.create({
-      transactionId: nowId('WLT'),
-      idempotencyKey,
-      userId: new mongoose.Types.ObjectId(params.userId),
-      type: 'WITHDRAWAL_REFUND',
-      amountCents: params.amountCents,
-      currency: 'USD',
-      previousAvailableCents: 0,
-      newAvailableCents: 0,
-      previousReservedCents: 0,
-      newReservedCents: 0,
-      status: 'PENDING',
-      relatedWithdrawalId: new mongoose.Types.ObjectId(params.withdrawalId),
-      reason: 'Withdrawal rejected — reserved amount returned'
-    });
+    let transaction = existing;
+    if (!transaction) {
+      try {
+        transaction = await WalletTransactionModel.create({
+          transactionId: nowId('WLT'),
+          idempotencyKey,
+          userId: new mongoose.Types.ObjectId(params.userId),
+          type: 'WITHDRAWAL_REFUND',
+          amountCents: params.amountCents,
+          currency: 'USD',
+          previousAvailableCents: 0,
+          newAvailableCents: 0,
+          previousReservedCents: 0,
+          newReservedCents: 0,
+          status: 'PENDING',
+          relatedWithdrawalId: new mongoose.Types.ObjectId(params.withdrawalId),
+          reason: 'Withdrawal rejected — reserved amount returned'
+        });
+      } catch (error: any) {
+        if (error?.code !== 11000) throw error;
+        transaction = await WalletTransactionModel.findOne({ idempotencyKey });
+      }
+    } else {
+      transaction.status = 'PENDING';
+      await transaction.save();
+    }
+
+    if (!transaction) {
+      throw ApiError.conflict('Withdrawal refund is already processing');
+    }
 
     const userObjectId = new mongoose.Types.ObjectId(params.userId);
     const updated = await WalletModel.findOneAndUpdate(
@@ -303,21 +329,36 @@ export class WalletService {
     const existing = await WalletTransactionModel.findOne({ idempotencyKey });
     if (existing?.status === 'COMPLETED') return existing;
 
-    const transaction = await WalletTransactionModel.create({
-      transactionId: nowId('WLT'),
-      idempotencyKey,
-      userId: new mongoose.Types.ObjectId(params.userId),
-      type: 'WITHDRAWAL_PAID',
-      amountCents: 0,
-      currency: 'USD',
-      previousAvailableCents: 0,
-      newAvailableCents: 0,
-      previousReservedCents: 0,
-      newReservedCents: 0,
-      status: 'PENDING',
-      relatedWithdrawalId: new mongoose.Types.ObjectId(params.withdrawalId),
-      reason: 'Withdrawal paid/completed; reserved amount converted to total withdrawn'
-    });
+    let transaction = existing;
+    if (!transaction) {
+      try {
+        transaction = await WalletTransactionModel.create({
+          transactionId: nowId('WLT'),
+          idempotencyKey,
+          userId: new mongoose.Types.ObjectId(params.userId),
+          type: 'WITHDRAWAL_PAID',
+          amountCents: 0,
+          currency: 'USD',
+          previousAvailableCents: 0,
+          newAvailableCents: 0,
+          previousReservedCents: 0,
+          newReservedCents: 0,
+          status: 'PENDING',
+          relatedWithdrawalId: new mongoose.Types.ObjectId(params.withdrawalId),
+          reason: 'Withdrawal paid/completed; reserved amount converted to total withdrawn'
+        });
+      } catch (error: any) {
+        if (error?.code !== 11000) throw error;
+        transaction = await WalletTransactionModel.findOne({ idempotencyKey });
+      }
+    } else {
+      transaction.status = 'PENDING';
+      await transaction.save();
+    }
+
+    if (!transaction) {
+      throw ApiError.conflict('Withdrawal completion is already processing');
+    }
 
     const userObjectId = new mongoose.Types.ObjectId(params.userId);
     const updated = await WalletModel.findOneAndUpdate(
@@ -609,8 +650,9 @@ export class WalletService {
   async createWithdrawal(userId: string, input: {
     amountCents?: number;
     amountUsd?: number;
+    methodId?: string;
     walletAddress: string;
-    network: string;
+    network?: string;
     idempotencyKey?: string;
   }): Promise<IWithdrawalRequest> {
     const amountCents =
@@ -619,11 +661,27 @@ export class WalletService {
     if (!Number.isInteger(amountCents) || amountCents <= 0) {
       throw ApiError.badRequest('Withdrawal amount must be greater than zero');
     }
-    if (!input.walletAddress || input.walletAddress.trim().length < 8) {
-      throw ApiError.badRequest('A valid receiving wallet address is required');
+
+    const method = resolveWithdrawalMethod({
+      methodId: input.methodId,
+      network: input.network
+    });
+    if (!method) {
+      throw ApiError.badRequest(
+        'Select a supported cryptocurrency and network for your withdrawal.',
+        'UNSUPPORTED_WITHDRAWAL_METHOD'
+      );
     }
-    if (!input.network || input.network.trim().length < 2) {
-      throw ApiError.badRequest('Receiving payment network is required');
+
+    const walletAddress = String(input.walletAddress || '').trim();
+    if (!walletAddress) {
+      throw ApiError.badRequest('A receiving wallet address is required');
+    }
+    if (!validateWithdrawalAddress(method, walletAddress)) {
+      throw ApiError.badRequest(
+        `The wallet address does not look valid for ${method.label}. ${method.addressHint}`,
+        'INVALID_WITHDRAWAL_ADDRESS'
+      );
     }
 
     const user = await UserModel.findById(userId);
@@ -641,7 +699,7 @@ export class WalletService {
     const recentDuplicate = await WithdrawalRequestModel.findOne({
       userId: user._id,
       amountCents,
-      walletAddress: input.walletAddress.trim(),
+      walletAddress,
       status: { $in: ['PENDING', 'APPROVED'] },
       createdAt: { $gte: new Date(Date.now() - 30_000) }
     });
@@ -655,8 +713,10 @@ export class WalletService {
       userId: user._id,
       amountCents,
       currency: 'USD',
-      walletAddress: input.walletAddress.trim(),
-      network: input.network.trim().toUpperCase(),
+      withdrawalCurrency: method.currency,
+      networkId: method.id,
+      walletAddress,
+      network: method.network,
       status: 'PENDING'
     });
 
@@ -679,9 +739,43 @@ export class WalletService {
       user._id,
       'WITHDRAWAL_UPDATE',
       'Withdrawal Request Submitted',
-      `Your withdrawal request for $${(amountCents / 100).toFixed(2)} is pending admin review.`,
+      `Your ${method.label} withdrawal request for $${(amountCents / 100).toFixed(2)} is pending admin review.`,
       '/dashboard?tab=wallet'
     ).catch(() => null);
+
+    // Confirmation email is an event side-effect and must never undo the
+    // successfully reserved withdrawal if SMTP is temporarily unavailable.
+    try {
+      if (user.email) {
+        const rendered = withdrawalSubmitted({
+          name: user.name,
+          amountUsd: amountCents / 100,
+          currency: method.currency,
+          network: method.network,
+          address: walletAddress,
+          requestId: withdrawal.requestId,
+          walletUrl: `${env.PUBLIC_FRONTEND_URL.replace(/\/$/, '')}/dashboard?tab=wallet`
+        });
+        await transactionalEmailService.send({
+          idempotencyKey: `withdrawal-submitted:${withdrawal._id}`,
+          userId: user._id,
+          toEmail: user.email,
+          templateKey: 'WITHDRAWAL_SUBMITTED',
+          rendered,
+          metadata: {
+            withdrawalId: withdrawal._id.toString(),
+            requestId: withdrawal.requestId,
+            amountCents,
+            methodId: method.id
+          }
+        });
+      }
+    } catch (emailError: any) {
+      logger.error('Withdrawal submission email could not be queued', {
+        withdrawalId: withdrawal._id.toString(),
+        error: emailError?.message
+      });
+    }
 
     return withdrawal;
   }
@@ -743,6 +837,35 @@ export class WalletService {
       '/dashboard?tab=wallet'
     ).catch(() => null);
 
+    try {
+      const populated = await UserModel.findById(updated.userId).select('name email');
+      if (populated?.email) {
+        const method =
+          resolveWithdrawalMethod({ methodId: updated.networkId, network: updated.network }) || undefined;
+        const rendered = withdrawalApproved({
+          name: populated.name,
+          amountUsd: updated.amountCents / 100,
+          currency: updated.withdrawalCurrency || method?.currency || updated.currency,
+          network: method?.network || updated.network,
+          requestId: updated.requestId,
+          walletUrl: `${env.PUBLIC_FRONTEND_URL.replace(/\/$/, '')}/dashboard?tab=wallet`
+        });
+        await transactionalEmailService.send({
+          idempotencyKey: `withdrawal-approved:${updated._id}`,
+          userId: updated.userId,
+          toEmail: populated.email,
+          templateKey: 'WITHDRAWAL_APPROVED',
+          rendered,
+          metadata: { withdrawalId: updated._id.toString(), requestId: updated.requestId }
+        });
+      }
+    } catch (emailError: any) {
+      logger.error('Withdrawal approval email could not be queued', {
+        withdrawalId: updated._id.toString(),
+        error: emailError?.message
+      });
+    }
+
     await AuditLogModel.create({
       action: 'WITHDRAWAL_APPROVE',
       adminId: new mongoose.Types.ObjectId(adminId),
@@ -803,6 +926,36 @@ export class WalletService {
       '/dashboard?tab=wallet'
     ).catch(() => null);
 
+    try {
+      const populated = await UserModel.findById(updated.userId).select('name email');
+      if (populated?.email) {
+        const method =
+          resolveWithdrawalMethod({ methodId: updated.networkId, network: updated.network }) || undefined;
+        const rendered = withdrawalRejected({
+          name: populated.name,
+          amountUsd: updated.amountCents / 100,
+          currency: updated.withdrawalCurrency || method?.currency || updated.currency,
+          network: method?.network || updated.network,
+          requestId: updated.requestId,
+          reason: reason.trim(),
+          walletUrl: `${env.PUBLIC_FRONTEND_URL.replace(/\/$/, '')}/dashboard?tab=wallet`
+        });
+        await transactionalEmailService.send({
+          idempotencyKey: `withdrawal-rejected:${updated._id}`,
+          userId: updated.userId,
+          toEmail: populated.email,
+          templateKey: 'WITHDRAWAL_REJECTED',
+          rendered,
+          metadata: { withdrawalId: updated._id.toString(), requestId: updated.requestId }
+        });
+      }
+    } catch (emailError: any) {
+      logger.error('Withdrawal rejection email could not be queued', {
+        withdrawalId: updated._id.toString(),
+        error: emailError?.message
+      });
+    }
+
     await AuditLogModel.create({
       action: 'WITHDRAWAL_REJECT',
       adminId: new mongoose.Types.ObjectId(adminId),
@@ -832,12 +985,19 @@ export class WalletService {
       throw ApiError.conflict('Withdrawal must be approved before it can be marked paid');
     }
 
+    const cleanHash = String(transactionHash || '').trim();
+    if (cleanHash.length < 6) {
+      throw ApiError.badRequest(
+        'A transaction hash or payout reference of at least 6 characters is required when marking a withdrawal as paid.'
+      );
+    }
+
     const updated = await WithdrawalRequestModel.findOneAndUpdate(
       { _id: withdrawal._id, status: 'APPROVED' },
       {
         $set: {
           status: 'PAID',
-          transactionHash: transactionHash?.trim(),
+          transactionHash: cleanHash,
           reviewedByAdminId: new mongoose.Types.ObjectId(adminId),
           reviewedByAdminEmail: adminEmail,
           paidAt: new Date()
@@ -857,9 +1017,44 @@ export class WalletService {
       updated.userId,
       'WITHDRAWAL_UPDATE',
       'Withdrawal Paid',
-      `Your withdrawal request has been completed. Payment of $${(updated.amountCents / 100).toFixed(2)} has been sent to your wallet.${transactionHash ? ` Transaction hash: ${transactionHash}` : ''}`,
+      `Your withdrawal request has been completed. Payment of $${(updated.amountCents / 100).toFixed(2)} has been sent to your wallet.${cleanHash ? ` Transaction hash: ${cleanHash}` : ''}`,
       '/dashboard?tab=wallet'
     ).catch(() => null);
+
+    try {
+      const populated = await UserModel.findById(updated.userId).select('name email');
+      if (populated?.email) {
+        const method =
+          resolveWithdrawalMethod({ methodId: updated.networkId, network: updated.network }) || undefined;
+        const rendered = withdrawalPaid({
+          name: populated.name,
+          amountUsd: updated.amountCents / 100,
+          currency: updated.withdrawalCurrency || method?.currency || updated.currency,
+          network: method?.network || updated.network,
+          requestId: updated.requestId,
+          transactionHash: cleanHash,
+          completedAt: updated.paidAt || new Date(),
+          walletUrl: `${env.PUBLIC_FRONTEND_URL.replace(/\/$/, '')}/dashboard?tab=wallet`
+        });
+        await transactionalEmailService.send({
+          idempotencyKey: `withdrawal-paid:${updated._id}`,
+          userId: updated.userId,
+          toEmail: populated.email,
+          templateKey: 'WITHDRAWAL_PAID',
+          rendered,
+          metadata: {
+            withdrawalId: updated._id.toString(),
+            requestId: updated.requestId,
+            transactionHash: cleanHash
+          }
+        });
+      }
+    } catch (emailError: any) {
+      logger.error('Withdrawal paid email could not be queued', {
+        withdrawalId: updated._id.toString(),
+        error: emailError?.message
+      });
+    }
 
     await AuditLogModel.create({
       action: 'WITHDRAWAL_PAID',
@@ -872,7 +1067,7 @@ export class WalletService {
       newValue: {
         status: 'PAID',
         amountCents: updated.amountCents,
-        transactionHash: transactionHash?.trim()
+        transactionHash: cleanHash
       }
     }).catch(() => null);
 

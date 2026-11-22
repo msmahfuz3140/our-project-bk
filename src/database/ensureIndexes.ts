@@ -12,7 +12,12 @@ import { CommissionPolicyModel } from '../models/CommissionPolicy';
 import { WalletModel } from '../models/Wallet';
 import { WalletTransactionModel } from '../models/WalletTransaction';
 import { WithdrawalRequestModel } from '../models/WithdrawalRequest';
+import { EmailNotificationModel } from '../models/EmailNotification';
+import { AdminTwoFactorModel } from '../models/AdminTwoFactor';
+import { AdminRecoveryCodeModel } from '../models/AdminRecoveryCode';
+import { AdminTwoFactorChallengeModel } from '../models/AdminTwoFactorChallenge';
 import { SystemMigrationModel } from '../models/SystemMigration';
+import { resolveWithdrawalMethod } from '../shared/withdrawalMethods';
 import { logger } from '../utils/logger';
 
 let ensured = false;
@@ -47,6 +52,10 @@ export async function ensurePaymentIndexes(): Promise<boolean> {
       WalletModel.createIndexes(),
       WalletTransactionModel.createIndexes(),
       WithdrawalRequestModel.createIndexes(),
+      EmailNotificationModel.createIndexes(),
+      AdminTwoFactorModel.createIndexes(),
+      AdminRecoveryCodeModel.createIndexes(),
+      AdminTwoFactorChallengeModel.createIndexes(),
       UserModel.createIndexes(),
       SystemMigrationModel.createIndexes(),
       OtpVerificationModel.createIndexes()
@@ -142,4 +151,132 @@ export async function ensureSecurityBaseline(): Promise<{ removedPlaintextPasswo
     removedPlaintextPasswords: passwordResult.modifiedCount,
     removedRawOtps: otpResult.modifiedCount
   };
+}
+
+/**
+ * Safe, idempotent data migration for the referral/verification/withdrawal
+ * release. It only fills missing optional fields and never rewrites business
+ * history, balances, commissions, or referral relationships.
+ */
+export async function ensureTrustAndPayoutMigration(): Promise<{
+  withdrawalMethodsBackfilled: number;
+  verifiedTimestampsBackfilled: number;
+}> {
+  if (mongoose.connection.readyState !== 1) {
+    return { withdrawalMethodsBackfilled: 0, verifiedTimestampsBackfilled: 0 };
+  }
+
+  const migrationKey = '2026-11-referral-verification-payout-v1';
+  const existing = await SystemMigrationModel.findOne({ key: migrationKey }).lean();
+  if (existing) {
+    return { withdrawalMethodsBackfilled: 0, verifiedTimestampsBackfilled: 0 };
+  }
+
+  let withdrawalMethodsBackfilled = 0;
+  const legacyWithdrawals = await WithdrawalRequestModel.find({
+    $or: [
+      { withdrawalCurrency: { $exists: false } },
+      { networkId: { $exists: false } }
+    ]
+  })
+    .select('_id network withdrawalCurrency networkId')
+    .lean();
+
+  for (const withdrawal of legacyWithdrawals as any[]) {
+    const method = resolveWithdrawalMethod({ network: withdrawal.network });
+    if (!method) continue;
+    await WithdrawalRequestModel.updateOne(
+      { _id: withdrawal._id },
+      {
+        $set: {
+          withdrawalCurrency: withdrawal.withdrawalCurrency || method.currency,
+          networkId: withdrawal.networkId || method.id,
+          network: method.network
+        }
+      }
+    );
+    withdrawalMethodsBackfilled += 1;
+  }
+
+  const verifiedUsers = await UserModel.find({
+    isEmailVerified: true,
+    emailVerifiedAt: { $exists: false }
+  })
+    .select('_id updatedAt createdAt')
+    .lean();
+
+  let verifiedTimestampsBackfilled = 0;
+  for (const user of verifiedUsers as any[]) {
+    await UserModel.updateOne(
+      { _id: user._id },
+      { $set: { emailVerifiedAt: user.updatedAt || user.createdAt || new Date() } }
+    );
+    verifiedTimestampsBackfilled += 1;
+  }
+
+  await SystemMigrationModel.updateOne(
+    { key: migrationKey },
+    {
+      $setOnInsert: {
+        key: migrationKey,
+        appliedAt: new Date(),
+        details: { withdrawalMethodsBackfilled, verifiedTimestampsBackfilled }
+      }
+    },
+    { upsert: true }
+  );
+
+  if (withdrawalMethodsBackfilled || verifiedTimestampsBackfilled) {
+    logger.info('Applied referral/verification/payout data migration', {
+      withdrawalMethodsBackfilled,
+      verifiedTimestampsBackfilled
+    });
+  }
+
+  return { withdrawalMethodsBackfilled, verifiedTimestampsBackfilled };
+}
+
+/**
+ * Records the Admin 2FA rollout marker. Existing administrators are NOT marked
+ * as 2FA-enabled; they must complete setup on their next login. The marker only
+ * documents how many admin accounts require enrollment at deployment time.
+ */
+export async function ensureAdminTwoFactorRolloutMarker(): Promise<{
+  adminAccountsAtRollout: number;
+}> {
+  if (mongoose.connection.readyState !== 1) {
+    return { adminAccountsAtRollout: 0 };
+  }
+
+  const migrationKey = '2026-11-admin-2fa-mandatory-v1';
+  const existing = await SystemMigrationModel.findOne({ key: migrationKey }).lean();
+  if (existing) {
+    return {
+      adminAccountsAtRollout: Number((existing as any)?.details?.adminAccountsAtRollout || 0)
+    };
+  }
+
+  const adminAccountsAtRollout = await UserModel.countDocuments({
+    role: 'SUPER_ADMIN',
+    isDeleted: { $ne: true }
+  });
+
+  await SystemMigrationModel.updateOne(
+    { key: migrationKey },
+    {
+      $setOnInsert: {
+        key: migrationKey,
+        appliedAt: new Date(),
+        details: {
+          adminAccountsAtRollout,
+          requiredEnrollment: true,
+          note: 'Existing admins are not auto-enabled; each must complete TOTP setup on next login.'
+        }
+      }
+    },
+    { upsert: true }
+  );
+
+  logger.info('Admin 2FA rollout marker applied', { adminAccountsAtRollout });
+  return { adminAccountsAtRollout };
 }

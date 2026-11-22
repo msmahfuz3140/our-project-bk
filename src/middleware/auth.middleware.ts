@@ -4,6 +4,7 @@ import { env } from '../config/env';
 import { ApiError } from '../utils/apiError';
 import { UserRole } from '../shared/roles';
 import { UserModel, AccountStatus } from '../models/User';
+import { AdminTwoFactorModel } from '../models/AdminTwoFactor';
 import { SubscriptionModel } from '../models/Subscription';
 import { AuthUser } from '../shared/auth';
 import { cacheKeys, memoryCache } from '../utils/cache';
@@ -40,7 +41,24 @@ export async function requireAuth(
   }
 
   try {
-    const decoded = jwt.verify(token, env.JWT_SECRET) as { userId: string; iat?: number };
+    const decoded = jwt.verify(token, env.JWT_SECRET) as {
+      userId: string;
+      iat?: number;
+      scope?: string;
+      amr?: string[];
+    };
+
+    // Pre-authentication 2FA challenges are not full sessions and must never
+    // be accepted as an authenticated admin credential.
+    if (decoded.scope === 'admin_2fa_challenge') {
+      next(
+        ApiError.unauthorized(
+          'Administrator two-step verification is not complete.',
+          'ADMIN_2FA_REQUIRED'
+        )
+      );
+      return;
+    }
 
     // A 5-second local cache removes repeated user + subscription lookups when
     // one dashboard makes several API calls. This cache is memory-only and is
@@ -86,6 +104,23 @@ export async function requireAuth(
       return;
     }
 
+    if (user.email && !user.isEmailVerified) {
+      next(
+        new ApiError(
+          403,
+          'Please verify your email address before accessing your account.',
+          'EMAIL_NOT_VERIFIED',
+          { target: user.email, purpose: 'REGISTRATION' }
+        )
+      );
+      return;
+    }
+
+    if (!user.isActive) {
+      next(ApiError.forbidden('This account is not active. Please verify your email or contact support.'));
+      return;
+    }
+
     if (user.sessionsRevokedAt && decoded.iat) {
       // JWT `iat` has one-second precision. Allow a short grace window so a
       // token issued immediately after an administrative reset (same second)
@@ -99,6 +134,17 @@ export async function requireAuth(
     }
 
     const activeSub = context.activeSub;
+
+    let adminTwoFactorEnabled = false;
+    let adminTwoFactorVerified = false;
+    if (user.role === UserRole.SUPER_ADMIN) {
+      const twoFactor = await AdminTwoFactorModel.findOne({ userId: user._id })
+        .select('enabled')
+        .lean();
+      adminTwoFactorEnabled = Boolean((twoFactor as any)?.enabled);
+      adminTwoFactorVerified =
+        adminTwoFactorEnabled && Array.isArray(decoded.amr) && decoded.amr.includes('totp');
+    }
 
     req.user = {
       id: user._id.toString(),
@@ -115,6 +161,8 @@ export async function requireAuth(
       hasActiveSubscription: !!activeSub || user.role === UserRole.SUPER_ADMIN || user.role === UserRole.MODERATOR,
       subscriptionPlanId: activeSub?.planId,
       subscriptionExpiresAt: activeSub?.endDate ? new Date(activeSub.endDate).toISOString() : undefined,
+      adminTwoFactorEnabled,
+      adminTwoFactorVerified,
       createdAt: new Date(user.createdAt).toISOString()
     };
 
@@ -140,8 +188,52 @@ export function requireRole(...allowedRoles: UserRole[]) {
   };
 }
 
-export function requirePremiumSubscription(
+/**
+ * Server-side enforcement for every Admin Panel request. A valid password
+ * session is not enough: the admin must have enabled TOTP and the current
+ * token must prove the TOTP factor was completed.
+ */
+export function requireAdmin2FA(
   req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  if (!req.user) {
+    next(ApiError.unauthorized());
+    return;
+  }
+
+  if (req.user.role !== UserRole.SUPER_ADMIN) {
+    next();
+    return;
+  }
+
+  if (!req.user.adminTwoFactorEnabled) {
+    next(
+      new ApiError(
+        403,
+        'Authenticator-app two-step verification must be set up before accessing the Admin Panel.',
+        'ADMIN_2FA_SETUP_REQUIRED'
+      )
+    );
+    return;
+  }
+
+  if (!req.user.adminTwoFactorVerified) {
+    next(
+      new ApiError(
+        403,
+        'Two-step verification is required for Admin Panel access.',
+        'ADMIN_2FA_REQUIRED'
+      )
+    );
+    return;
+  }
+
+  next();
+}
+
+export function requirePremiumSubscription(  req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
 ): void {

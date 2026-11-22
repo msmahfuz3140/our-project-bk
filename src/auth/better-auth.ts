@@ -1,9 +1,7 @@
 import { betterAuth } from 'better-auth';
 import { mongodbAdapter } from 'better-auth/adapters/mongodb';
-import { phoneNumber, emailOTP, bearer } from 'better-auth/plugins';
+import { bearer } from 'better-auth/plugins';
 import mongoose from 'mongoose';
-import { emailService } from '../services/email.service';
-import { smsService } from '../services/sms.service';
 import { env } from '../config/env';
 import { isProductionRuntime } from '../config/env';
 
@@ -46,23 +44,11 @@ export function getBetterAuth(): any {
       }
     },
     emailAndPassword: {
-      enabled: true,
-      requireEmailVerification: false
+      enabled: false,
+      requireEmailVerification: true
     },
     plugins: [
-      bearer(),
-      emailOTP({
-        expiresIn: 600, // 10 minutes
-        sendVerificationOTP: async ({ email, otp }) => {
-          await emailService.sendVerificationOtp(email, otp);
-        }
-      }),
-      phoneNumber({
-        expiresIn: 600, // 10 minutes
-        sendOTP: async ({ phoneNumber: targetPhone, code }) => {
-          await smsService.sendVerificationOtp(targetPhone, code);
-        }
-      })
+      bearer()
     ]
   });
 }

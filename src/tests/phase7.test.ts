@@ -157,29 +157,47 @@ async function runPhase7Tests() {
     });
     testAssert(attributionAudit !== null, 'REFERRAL_ATTRIBUTION audit log recorded');
 
-    // Test 2.1b: Invalid non-existent referral code
-    await authService.register({
-      name: 'Buyer with Invalid Code',
-      email: 'buyer.invalid.code@test.com',
-      password: 'Pass12345678!',
-      referralCode: 'MOD_DOES_NOT_EXIST_XYZ'
-    });
-    const buyerInvalidCode = await UserModel.findOne({ email: 'buyer.invalid.code@test.com' });
-    testAssert(buyerInvalidCode?.referredBy === undefined || buyerInvalidCode?.referredBy === null, 'Invalid referral code is safely rejected and grants zero attribution');
+    // Test 2.1b: Invalid non-existent referral code must reject registration
+    let invalidCodeRejected = false;
+    try {
+      await authService.register({
+        name: 'Buyer with Invalid Code',
+        email: 'buyer.invalid.code@test.com',
+        password: 'Pass12345678!',
+        referralCode: 'MOD_DOES_NOT_EXIST_XYZ'
+      });
+    } catch (err: any) {
+      invalidCodeRejected = err?.code === 'INVALID_REFERRAL_CODE' || err?.statusCode === 400;
+    }
+    assert(invalidCodeRejected, 'Invalid referral code rejects registration');
+    assert(
+      (await UserModel.findOne({ email: 'buyer.invalid.code@test.com' })) === null,
+      'Invalid referral code creates no account'
+    );
 
-    // Test 2.2: Self-referral prevention (Moderator attempts to register with own email or phone)
-    await authService.register({
-      name: 'Fraud Self Attempt',
-      email: 'affiliate1@roulette.partners.duplicate.com',
-      phone: '+8801811223344', // Moderator's phone!
-      password: 'Pass12345678!',
-      referralCode: moderatorUser.referralCode
-    }).catch(() => null);
+    // Test 2.2: Self-referral prevention (Moderator attempts to register with own phone)
+    let selfReferralRejected = false;
+    try {
+      await authService.register({
+        name: 'Fraud Self Attempt',
+        email: 'affiliate1@roulette.partners.duplicate.com',
+        phone: '+8801811223344', // Moderator's phone!
+        password: 'Pass12345678!',
+        referralCode: moderatorUser.referralCode
+      });
+    } catch (err: any) {
+      selfReferralRejected = err?.code === 'SELF_REFERRAL_NOT_ALLOWED';
+    }
+    assert(selfReferralRejected, 'Self-referral registration is rejected');
+    assert(
+      (await UserModel.findOne({ email: 'affiliate1@roulette.partners.duplicate.com' })) === null,
+      'Self-referral attempt creates no account'
+    );
 
     const selfAudit = await AuditLogModel.findOne({
       action: 'REFERRAL_FRAUD_FLAG'
     });
-    testAssert(selfAudit !== null, 'Self-referral attempt detected and flagged in audit log');
+    assert(selfAudit !== null, 'Self-referral attempt detected and flagged in audit log');
 
     // Test 2.3: Normal user referral code is now a valid one-time referrer
     const normalUser = await UserModel.create({
@@ -188,7 +206,10 @@ async function runPhase7Tests() {
       passwordHash: await hashPassword('UserPass123!'),
       role: UserRole.USER,
       referralCode: 'USER_CODE_XYZ',
-      isActive: true
+      isEmailVerified: true,
+      isActive: true,
+      accountStatus: AccountStatus.ACTIVE,
+      referralEligible: true
     });
 
     await authService.register({
@@ -213,15 +234,22 @@ async function runPhase7Tests() {
       'Investigation into promotional materials'
     );
 
-    await authService.register({
-      name: 'Buyer Under Suspended Mod',
-      email: 'buyer.suspended@test.com',
-      password: 'Pass12345678!',
-      referralCode: moderatorUser.referralCode
-    });
-
-    const buyerUnderSuspended = await UserModel.findOne({ email: 'buyer.suspended@test.com' });
-    testAssert(buyerUnderSuspended?.referredBy === undefined || buyerUnderSuspended?.referredBy === null, 'Suspended moderator referral code is rejected for attribution');
+    let suspendedCodeRejected = false;
+    try {
+      await authService.register({
+        name: 'Buyer Under Suspended Mod',
+        email: 'buyer.suspended@test.com',
+        password: 'Pass12345678!',
+        referralCode: moderatorUser.referralCode
+      });
+    } catch (err: any) {
+      suspendedCodeRejected = err?.code === 'INVALID_REFERRAL_CODE' || err?.statusCode === 400;
+    }
+    assert(suspendedCodeRejected, 'Suspended moderator referral code is rejected');
+    assert(
+      (await UserModel.findOne({ email: 'buyer.suspended@test.com' })) === null,
+      'Suspended referral code creates no account'
+    );
 
     // Restore moderator to ACTIVE
     await moderatorService.updateModeratorStatus(

@@ -5,10 +5,14 @@ import { securityService } from '../services/security.service';
 import { toolAdminService } from '../services/toolAdmin.service';
 import { aiAssistantService } from '../services/aiAssistant.service';
 import { NotificationModel } from '../models/Notification';
+import { EmailNotificationModel } from '../models/EmailNotification';
 import { UserModel } from '../models/User';
 import { SubscriptionModel } from '../models/Subscription';
+import { AuditLogModel } from '../models/AuditLog';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
+import { transactionalEmailService } from '../services/transactionalEmail.service';
+import mongoose from 'mongoose';
 
 export class AdminExtendedController {
   // --- Support Tickets ---
@@ -257,6 +261,81 @@ export class AdminExtendedController {
           deliveredAt: new Date().toISOString()
         }
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // --- Transactional Email Delivery Monitoring ---
+  async getEmailNotificationMetrics(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const metrics = await transactionalEmailService.getMetrics();
+      res.status(200).json({ success: true, data: metrics });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async listEmailNotifications(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { status, templateKey, search, page, limit } = req.query;
+      const result = await transactionalEmailService.listForAdmin({
+        status: status as string,
+        templateKey: templateKey as string,
+        search: search as string,
+        page: page ? Number(page) : 1,
+        limit: limit ? Number(limit) : 25
+      });
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async retryEmailNotification(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const id = req.params.id as string;
+      const result = await transactionalEmailService.retryById(id, {
+        id: req.user!.id,
+        email: req.user?.email || 'admin'
+      });
+
+      await AuditLogModel.create({
+        action: 'EMAIL_NOTIFICATION_RETRY',
+        adminId: new mongoose.Types.ObjectId(req.user!.id),
+        adminEmail: req.user?.email || 'admin',
+        targetResourceId: id,
+        resourceType: 'EmailNotification',
+        reason: 'Administrator requested a transactional email retry',
+        newValue: { status: result.status, attempts: result.attempts }
+      }).catch(() => null);
+
+      res.status(200).json({
+        success: true,
+        message:
+          result.status === 'SENT'
+            ? 'Email delivered successfully'
+            : result.status === 'PENDING'
+              ? 'Email queued for retry'
+              : 'Email could not be delivered',
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async getEmailNotificationDetails(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const id = req.params.id as string;
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        throw ApiError.badRequest('Invalid email notification id');
+      }
+      const record = await EmailNotificationModel.findById(id)
+        .select('-htmlBody -textBody -metadata')
+        .lean();
+      if (!record) throw ApiError.notFound('Email notification was not found');
+      res.status(200).json({ success: true, data: record });
     } catch (error) {
       next(error);
     }

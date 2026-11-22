@@ -4,6 +4,7 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { app } from '../app';
 import { env } from '../config/env';
 import { UserModel } from '../models/User';
+import { AdminTwoFactorModel } from '../models/AdminTwoFactor';
 import { PaymentModel } from '../models/Payment';
 import { SubscriptionModel } from '../models/Subscription';
 import { ContactMessageModel } from '../models/ContactMessage';
@@ -30,7 +31,7 @@ function assert(condition: boolean, name: string, detail?: unknown) {
 }
 
 function tokenFor(userId: string): string {
-  return jwt.sign({ userId }, env.JWT_SECRET, { expiresIn: '1h' });
+  return jwt.sign({ userId, scope: 'access', amr: ['pwd', 'totp'] }, env.JWT_SECRET, { expiresIn: '1h' });
 }
 
 async function get(path: string, token: string) {
@@ -68,6 +69,7 @@ async function run() {
     isEmailVerified: true,
     isActive: true
   });
+  await AdminTwoFactorModel.create({ userId: admin._id, enabled: true });
 
   const member = await UserModel.create({
     name: 'Member Smoke',

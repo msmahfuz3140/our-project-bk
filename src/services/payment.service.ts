@@ -12,6 +12,8 @@ import { websiteSettingsService } from './websiteSettings.service';
 import { commissionService, normalizeCommissionRate } from './commission.service';
 import { nowPaymentsService, NowPaymentsApiError } from './nowpayments.service';
 import { notificationService } from './notification.service';
+import { transactionalEmailService } from './transactionalEmail.service';
+import { paymentSuccess } from './emailTemplates';
 import { getPaymentIndexStatus } from '../database/ensureIndexes';
 import {
   PaymentStatus,
@@ -858,6 +860,22 @@ export class PaymentService {
         payment.ipnHistory = payment.ipnHistory.slice(-MAX_IPN_HISTORY);
       }
       await payment.save();
+
+      // Self-healing commission recovery: a transient commission/wallet error
+      // during the original event must not permanently lose a valid commission.
+      // Every layer is idempotent, so a retry here cannot double-credit.
+      if (payment.referredByModeratorId) {
+        await commissionService
+          .awardForPayment(payment, payment.subscriptionId?.toString())
+          .catch((commissionError: any) => {
+            logger.error('Referral commission recovery failed on duplicate webhook', {
+              orderId: payment.orderId,
+              error: commissionError?.message
+            });
+          });
+      }
+
+      await this.queuePaymentSuccessEmail(payment);
       await finishEvent('DUPLICATE', 'Order already fulfilled; state not downgraded');
       return {
         success: true,
@@ -1486,6 +1504,11 @@ export class PaymentService {
         };
       }
 
+      // Transactional success email is sent only after verified payment AND
+      // successful plan activation. The unique idempotency key prevents a
+      // duplicate email when the provider retries the same webhook.
+      await this.queuePaymentSuccessEmail(claimedPayment, subscription._id.toString());
+
       invalidatePaymentCaches(claimedPayment.userId.toString());
 
       return {
@@ -1500,6 +1523,57 @@ export class PaymentService {
         { $set: { fulfillmentStatus: 'NONE' } }
       ).catch(() => null);
       throw error;
+    }
+  }
+
+  /**
+   * Idempotently queue the payment-success email. Safe to call again from a
+   * duplicate webhook or reconciliation path.
+   */
+  private async queuePaymentSuccessEmail(
+    payment: IPayment,
+    subscriptionId?: string | mongoose.Types.ObjectId
+  ): Promise<void> {
+    try {
+      const targetSubscriptionId = subscriptionId || payment.subscriptionId;
+      if (!targetSubscriptionId) return;
+      const [payingUser, activeSubscription] = await Promise.all([
+        UserModel.findById(payment.userId).select('name email').lean<any>(),
+        SubscriptionModel.findById(targetSubscriptionId)
+          .select('startDate endDate isRevoked status')
+          .lean<any>()
+      ]);
+      if (!payingUser?.email || !activeSubscription || activeSubscription.isRevoked) return;
+
+      const rendered = paymentSuccess({
+        name: payingUser.name,
+        planName: payment.planName,
+        amountUsd: payment.priceAmount,
+        currency: payment.priceCurrency || 'USD',
+        reference: payment.orderId,
+        activatedAt: activeSubscription.startDate || payment.paidAt || new Date(),
+        expiresAt: activeSubscription.endDate,
+        dashboardUrl: `${env.PUBLIC_FRONTEND_URL.replace(/\/$/, '')}/dashboard/tool`
+      });
+
+      await transactionalEmailService.send({
+        idempotencyKey: `payment-success:${payment.orderId}`,
+        userId: payment.userId,
+        toEmail: payingUser.email,
+        templateKey: 'PAYMENT_SUCCESS',
+        rendered,
+        metadata: {
+          orderId: payment.orderId,
+          planId: payment.planId,
+          subscriptionId: targetSubscriptionId.toString(),
+          amountCents: payment.priceCents
+        }
+      });
+    } catch (emailError: any) {
+      logger.error('Payment success email could not be queued', {
+        orderId: payment.orderId,
+        error: emailError?.message
+      });
     }
   }
 

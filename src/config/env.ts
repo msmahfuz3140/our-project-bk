@@ -59,8 +59,23 @@ const envSchema = z.object({
   SMTP_SECURE: z.string().default('false').transform(v => v === 'true' || v === '1'),
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
+  SMTP_FROM_EMAIL: z.string().optional(),
+  SMTP_FROM_NAME: z.string().default('Roulette Accuracy'),
   EMAIL_PROVIDER_API_KEY: z.string().default(''),
   EMAIL_FROM: z.string().default('Roulette Accuracy <security@rouletteaccuracy.com>'),
+  // Registration / verification email behaviour. All values are safe defaults
+  // and can be overridden per deployment without code changes.
+  OTP_EXPIRY_MINUTES: z.string().default('10').transform(Number),
+  OTP_RESEND_COOLDOWN_SECONDS: z.string().default('60').transform(Number),
+  OTP_MAX_ATTEMPTS: z.string().default('5').transform(Number),
+  OTP_MAX_RESENDS_PER_HOUR: z.string().default('5').transform(Number),
+  // Admin Panel TOTP 2FA. The encryption key must be unique per deployment.
+  ADMIN_2FA_ENCRYPTION_KEY: z.string().default(''),
+  ADMIN_2FA_ISSUER: z.string().default('Roulette Accuracy Admin'),
+  ADMIN_2FA_CHALLENGE_TTL_SECONDS: z.string().default('600').transform(Number),
+  ADMIN_2FA_MAX_ATTEMPTS: z.string().default('5').transform(Number),
+  ADMIN_2FA_LOCK_MINUTES: z.string().default('15').transform(Number),
+  ADMIN_2FA_RECOVERY_CODE_COUNT: z.string().default('10').transform(Number),
   SMS_PROVIDER_API_KEY: z.string().default(''),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
@@ -142,11 +157,35 @@ export const env = {
   NOWPAYMENTS_API_URL: effectiveApiUrl,
   NOWPAYMENTS_CONFIGURED_API_URL: configuredApiUrl,
   NOWPAYMENTS_API_BASE_URL: effectiveApiUrl,
+  // Single authoritative sender header for every transactional email.
+  EMAIL_SENDER: (() => {
+    const fromEmail = (data.SMTP_FROM_EMAIL || '').trim();
+    const fromName = (data.SMTP_FROM_NAME || 'Roulette Accuracy').trim();
+    if (fromEmail) return `${fromName} <${fromEmail}>`;
+    return data.EMAIL_FROM;
+  })(),
   PAYMENT_IPN_CALLBACK_URL: webhookCallbackUrl,
   PAYMENT_SUCCESS_URL: trimTrailingSlash(data.PAYMENT_SUCCESS_URL || `${publicFrontendUrl}/checkout/success`),
   PAYMENT_CANCEL_URL: trimTrailingSlash(data.PAYMENT_CANCEL_URL || `${publicFrontendUrl}/checkout/failed`),
   PAYMENT_PENDING_URL: trimTrailingSlash(data.PAYMENT_PENDING_URL || `${publicFrontendUrl}/checkout/pending`)
 };
+
+/**
+ * True when at least one email transport is configured. Never exposes any
+ * credential; used by diagnostics and the transactional email service.
+ */
+export function isEmailTransportConfigured(): boolean {
+  const hasSmtp = Boolean(
+    (env.SMTP_HOST || '').trim() &&
+    (env.SMTP_USER || '').trim() &&
+    (env.SMTP_PASS || '').trim() &&
+    !/^(user|pass|your[_-]?)/i.test((env.SMTP_USER || '').trim()) &&
+    !/^(pass|your[_-]?)/i.test((env.SMTP_PASS || '').trim())
+  );
+  const hasProvider = Boolean((env.EMAIL_PROVIDER_API_KEY || '').trim());
+  return hasSmtp || hasProvider;
+}
+
 
 export interface PaymentConfigIssue {
   variable: string;
@@ -287,6 +326,26 @@ export function validateCoreEnvironment(): PaymentConfigIssue[] {
         variable: 'NODE_ENV',
         severity: 'WARNING',
         message: 'NODE_ENV is not "production" on a production deployment.'
+      });
+    }
+
+    if (!isEmailTransportConfigured()) {
+      issues.push({
+        variable: 'SMTP_HOST / SMTP_USER / SMTP_PASS',
+        severity: 'ERROR',
+        message: 'No transactional email transport is configured. Registration verification and payment/withdrawal emails cannot be delivered.'
+      });
+    }
+
+    if (
+      !env.ADMIN_2FA_ENCRYPTION_KEY ||
+      env.ADMIN_2FA_ENCRYPTION_KEY.length < 32 ||
+      /^replace_with|change_this|default|your[_-]?/i.test(env.ADMIN_2FA_ENCRYPTION_KEY)
+    ) {
+      issues.push({
+        variable: 'ADMIN_2FA_ENCRYPTION_KEY',
+        severity: 'ERROR',
+        message: 'A dedicated ADMIN_2FA_ENCRYPTION_KEY of at least 32 characters is required to encrypt administrator authenticator secrets at rest.'
       });
     }
   }

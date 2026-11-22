@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { paymentController } from '../controllers/payment.controller';
-import { requireAuth, requireRole } from '../middleware/auth.middleware';
+import { requireAuth, requireRole, requireAdmin2FA } from '../middleware/auth.middleware';
 import { rateLimit } from '../middleware/rateLimit.middleware';
 import { UserRole } from '../shared/roles';
 
@@ -38,23 +38,23 @@ router.post('/create-order', requireAuth, rateLimit(10, 15, 'order_create'), (re
 // --- Admin Controls (Main Admins only) ---
 // IMPORTANT: static admin routes must be registered before GET /:id.
 
-router.get('/admin/orders', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
+router.get('/admin/orders', requireAuth, requireRole(UserRole.SUPER_ADMIN), requireAdmin2FA, (req, res, next) =>
   paymentController.getAdminOrders(req, res, next)
 );
 
-router.get('/admin/orders/:orderId', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
+router.get('/admin/orders/:orderId', requireAuth, requireRole(UserRole.SUPER_ADMIN), requireAdmin2FA, (req, res, next) =>
   paymentController.getAdminOrderDetails(req, res, next)
 );
 
-router.get('/admin/summary', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
+router.get('/admin/summary', requireAuth, requireRole(UserRole.SUPER_ADMIN), requireAdmin2FA, (req, res, next) =>
   paymentController.getAdminSummary(req, res, next)
 );
 
-router.get('/admin/health', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
+router.get('/admin/health', requireAuth, requireRole(UserRole.SUPER_ADMIN), requireAdmin2FA, (req, res, next) =>
   paymentController.getAdminHealth(req, res, next)
 );
 
-router.post('/admin/reconcile', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
+router.post('/admin/reconcile', requireAuth, requireRole(UserRole.SUPER_ADMIN), requireAdmin2FA, (req, res, next) =>
   paymentController.reconcileAdminPayments(req, res, next)
 );
 
@@ -63,6 +63,7 @@ router.post(
   '/admin/orders/:orderId/approve',
   requireAuth,
   requireRole(UserRole.SUPER_ADMIN),
+  requireAdmin2FA,
   rateLimit(10, 15, 'payment_manual_approve'),
   (req, res, next) => paymentController.approveAdminPayment(req, res, next)
 );
@@ -71,11 +72,12 @@ router.post(
   '/admin/orders/:orderId/reject',
   requireAuth,
   requireRole(UserRole.SUPER_ADMIN),
+  requireAdmin2FA,
   rateLimit(10, 15, 'payment_manual_reject'),
   (req, res, next) => paymentController.rejectAdminPayment(req, res, next)
 );
 
-router.get('/admin/export', requireAuth, requireRole(UserRole.SUPER_ADMIN), (req, res, next) =>
+router.get('/admin/export', requireAuth, requireRole(UserRole.SUPER_ADMIN), requireAdmin2FA, (req, res, next) =>
   paymentController.exportAdminReport(req, res, next)
 );
 

@@ -6,6 +6,7 @@ import { OtpVerificationModel } from '../models/OtpVerification';
 import { OtpPurpose } from '../shared/auth';
 import { UserRole } from '../shared/roles';
 import { normalizePhoneNumber, isValidE164 } from '../utils/phone';
+import { hashPassword } from '../utils/crypto';
 import { bootstrapMainAdmins } from '../scripts/bootstrap-admins';
 
 let mongod: MongoMemoryServer;
@@ -44,6 +45,18 @@ async function runAuthTests() {
   try {
     await setupTestDb();
 
+    const authReferrer = await UserModel.create({
+      name: 'Auth Referrer',
+      email: 'referrer@example.com',
+      passwordHash: await hashPassword('ReferrerPass123!'),
+      role: UserRole.USER,
+      isEmailVerified: true,
+      isActive: true,
+      accountStatus: 'ACTIVE',
+      referralCode: 'REF-AUTH-TEST',
+      referralEligible: true
+    });
+
     // -------------------------------------------------------------
     // TEST 1: Phone Normalization (E.164)
     // -------------------------------------------------------------
@@ -61,23 +74,73 @@ async function runAuthTests() {
     assert(invalidPhoneFailed, 'Rejects invalid phone number strings with validation error');
 
     // -------------------------------------------------------------
-    // TEST 2: Email Registration
+    // TEST 2: Email Registration (mandatory referral + verification)
     // -------------------------------------------------------------
     console.log('\n[Suite 2: Email Registration Flow]');
+
+    let missingReferralBlocked = false;
+    try {
+      await authService.register({
+        name: 'No Referral User',
+        email: 'no.referral@example.com',
+        password: 'StrongPassword123!'
+      } as any);
+    } catch (err: any) {
+      missingReferralBlocked = err?.code === 'REFERRAL_REQUIRED' || err?.statusCode === 400;
+    }
+    assert(missingReferralBlocked, 'Registration without a referral code is rejected');
+
+    let invalidReferralBlocked = false;
+    try {
+      await authService.register({
+        name: 'Bad Referral User',
+        email: 'bad.referral@example.com',
+        password: 'StrongPassword123!',
+        referralCode: 'DOES-NOT-EXIST'
+      });
+    } catch (err: any) {
+      invalidReferralBlocked = err?.code === 'INVALID_REFERRAL_CODE' || err?.statusCode === 400;
+    }
+    assert(invalidReferralBlocked, 'Registration with an invalid referral code is rejected');
+    assert(
+      (await UserModel.findOne({ email: 'bad.referral@example.com' })) === null,
+      'Invalid referral code does not create an account'
+    );
+
     const regRes = await authService.register({
       name: 'Roulette Player',
       email: 'player@example.com',
-      password: 'StrongPassword123!'
+      password: 'StrongPassword123!',
+      referralCode: authReferrer.referralCode
     });
 
     assert(regRes.requiresVerification === true, 'Registration requires verification');
     assert(regRes.verificationTarget === 'player@example.com', 'Verification target matches email');
+    assert(!regRes.token, 'No session token is issued before email verification');
     assert(regRes.user.role === UserRole.USER, 'Assigned role is strictly USER');
     assert(regRes.user.isEmailVerified === false, 'isEmailVerified starts false');
+    assert(regRes.user.isActive === false, 'Account is inactive until email verification');
 
     const createdUser = await UserModel.findOne({ email: 'player@example.com' });
     assert(createdUser !== null, 'User saved in database');
     assert(createdUser?.passwordHash !== 'StrongPassword123!', 'Password is cryptographically hashed');
+    assert(
+      createdUser?.referredBy?.toString() === authReferrer._id.toString(),
+      'Permanent referrer database ID stored on the new user'
+    );
+    assert(createdUser?.referralCodeUsed === authReferrer.referralCode, 'Referral code snapshot stored');
+
+    // Login before verification must be blocked.
+    let unverifiedLoginBlocked = false;
+    try {
+      await authService.login({
+        identifier: 'player@example.com',
+        password: 'StrongPassword123!'
+      });
+    } catch (err: any) {
+      unverifiedLoginBlocked = err?.code === 'EMAIL_NOT_VERIFIED' && err?.statusCode === 403;
+    }
+    assert(unverifiedLoginBlocked, 'Login is blocked until email verification');
 
     // Duplicate email registration prevention
     let duplicateEmailBlocked = false;
@@ -85,7 +148,8 @@ async function runAuthTests() {
       await authService.register({
         name: 'Another Player',
         email: 'player@example.com',
-        password: 'Password123!'
+        password: 'Password123!',
+        referralCode: authReferrer.referralCode
       });
     } catch (err: any) {
       if (err.statusCode === 409 || err.message.includes('already exists')) {
@@ -94,17 +158,37 @@ async function runAuthTests() {
     }
     assert(duplicateEmailBlocked, 'Rejects duplicate email registration with 409 Conflict');
 
+    // Self-referral prevention
+    let selfReferralBlocked = false;
+    try {
+      await authService.register({
+        name: 'Self Referral',
+        email: 'referrer@example.com',
+        password: 'StrongPassword123!',
+        referralCode: authReferrer.referralCode
+      });
+    } catch (err: any) {
+      selfReferralBlocked =
+        err?.code === 'SELF_REFERRAL_NOT_ALLOWED' ||
+        err?.message?.includes('already exists') ||
+        err?.message?.includes('own referral');
+    }
+    assert(selfReferralBlocked, 'Self-referral is rejected');
+
     // -------------------------------------------------------------
-    // TEST 3: Phone Registration
+    // TEST 3: Phone Registration (with required email verification)
     // -------------------------------------------------------------
     console.log('\n[Suite 3: Phone Registration Flow]');
     const phoneRegRes = await authService.register({
       name: 'Mobile Bettor',
+      email: 'mobile@example.com',
       phone: '+1 (555) 012-3456',
-      password: 'MobilePassword99!'
+      password: 'MobilePassword99!',
+      referralCode: authReferrer.referralCode
     });
 
-    assert(phoneRegRes.verificationTarget === '+15550123456', 'Normalizes phone input to E.164 (+15550123456)');
+    assert(phoneRegRes.verificationTarget === 'mobile@example.com', 'Email verification target is used for phone registration');
+    assert(phoneRegRes.user.phone === '+15550123456', 'Normalizes phone input to E.164 (+15550123456)');
     assert(phoneRegRes.user.role === UserRole.USER, 'Role is strictly USER');
     assert(phoneRegRes.user.isPhoneVerified === false, 'isPhoneVerified starts false');
 
@@ -113,8 +197,10 @@ async function runAuthTests() {
     try {
       await authService.register({
         name: 'Another Mobile',
+        email: 'mobile.two@example.com',
         phone: '+1 555 012 3456',
-        password: 'AnotherPassword1!'
+        password: 'AnotherPassword1!',
+        referralCode: authReferrer.referralCode
       });
     } catch (err: any) {
       if (err.statusCode === 409 || err.message.includes('already exists')) {
@@ -184,19 +270,14 @@ async function runAuthTests() {
     // -------------------------------------------------------------
     console.log('\n[Suite 5: Resend OTP Cooldown]');
 
-    let cooldownBlocked = false;
-    try {
-      // Requesting resend immediately after registration (< 60s cooldown)
-      await authService.resendOtp({
-        target: 'player@example.com',
-        purpose: OtpPurpose.REGISTRATION
-      });
-    } catch (err: any) {
-      if (err.message.includes('Please wait') && err.message.includes('seconds')) {
-        cooldownBlocked = true;
-      }
-    }
-    assert(cooldownBlocked, 'Resend request within 60s cooldown is rejected');
+    const immediateResend = await authService.resendOtp({
+      target: 'player@example.com',
+      purpose: OtpPurpose.REGISTRATION
+    });
+    assert(
+      immediateResend.cooldownSeconds > 0 && immediateResend.cooldownSeconds <= 60,
+      'Resend within the 60s cooldown returns a countdown without sending a new code'
+    );
 
     // Simulate 61 seconds elapsed
     const freshRecord = await OtpVerificationModel.findOne({
@@ -213,11 +294,15 @@ async function runAuthTests() {
     });
     assert(allowedResend.success === true, 'Resend succeeds after 60-second cooldown expires');
 
-    // Now verify with new valid code
     const latestOtp = await OtpVerificationModel.findOne({
       target: 'player@example.com',
       purpose: OtpPurpose.REGISTRATION
     }).sort({ createdAt: -1 });
+    assert(
+      latestOtp?._id.toString() !== freshRecord?._id.toString(),
+      'A fresh OTP record is created after the cooldown'
+    );
+    assert(freshRecord?.isUsed === true, 'Previous unused code is invalidated on resend');
 
     const verifySuccess = await authService.verifyOtp({
       target: 'player@example.com',
@@ -253,14 +338,14 @@ async function runAuthTests() {
     assert(typeof emailLoginRes.token === 'string' && emailLoginRes.token.length > 20, 'JWT token returned on email login');
 
     // Phone login with unformatted identifier
-    // First verify phone user
+    // First verify the mobile user's email address.
     const phoneOtp = await OtpVerificationModel.findOne({
-      target: '+15550123456',
+      target: 'mobile@example.com',
       purpose: OtpPurpose.REGISTRATION
     }).sort({ createdAt: -1 });
 
     await authService.verifyOtp({
-      target: '+15550123456',
+      target: 'mobile@example.com',
       code: phoneOtp!.rawCodeDev!,
       purpose: OtpPurpose.REGISTRATION
     });

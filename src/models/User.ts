@@ -18,6 +18,7 @@ export interface IUser extends Document {
   passwordUpdatedByAdminEmail?: string;
   role: UserRole;
   isEmailVerified: boolean;
+  emailVerifiedAt?: Date;
   isPhoneVerified: boolean;
   isActive: boolean;
   accountStatus: AccountStatus;
@@ -36,8 +37,7 @@ export interface IUser extends Document {
   referralCodeUsed?: string;
   referralCommissionRate?: number;
   referralCommissionType?: 'ONE_TIME' | 'LIFETIME';
-  referralEligible: boolean;
-  moderatorCommissionRate?: number;
+  referralEligible: boolean;  moderatorCommissionRate?: number;
   moderatorNotes?: string;
   registrationIp?: string;
   lastLoginAt?: Date;
@@ -94,6 +94,9 @@ const UserSchema = new Schema<IUser>({
     type: Boolean,
     default: false
   },
+  emailVerifiedAt: {
+    type: Date
+  },
   isPhoneVerified: {
     type: Boolean,
     default: false
@@ -148,14 +151,17 @@ const UserSchema = new Schema<IUser>({
   referredBy: {
     type: Schema.Types.ObjectId,
     ref: 'User',
-    index: true
+    index: true,
+    immutable: true
   },
   referredAt: {
-    type: Date
+    type: Date,
+    immutable: true
   },
   referralCodeUsed: {
     type: String,
-    index: true
+    index: true,
+    immutable: true
   },
   referralCommissionRate: {
     type: Number,
