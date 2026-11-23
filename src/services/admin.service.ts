@@ -395,11 +395,26 @@ export class AdminService {
     }
 
     const users = rawUsers.map((u: any) => {
-      const uid = u._id.toString();
+      const uid = (u._id ? u._id.toString() : '') || (u.id ? u.id.toString() : '');
+      let refObj: any = null;
+      if (u.referredBy) {
+        if (typeof u.referredBy === 'object' && u.referredBy !== null) {
+          refObj = {
+            id: u.referredBy._id ? u.referredBy._id.toString() : '',
+            _id: u.referredBy._id ? u.referredBy._id.toString() : '',
+            name: u.referredBy.name || '',
+            email: u.referredBy.email || '',
+            referralCode: u.referredBy.referralCode || ''
+          };
+        } else {
+          refObj = u.referredBy.toString();
+        }
+      }
       const userObj = {
         ...u,
         id: uid,
-        _id: uid
+        _id: uid,
+        referredBy: refObj
       };
       const userSubs = subsByUserMap.get(uid) || [];
 
