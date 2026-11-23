@@ -21,6 +21,7 @@ import { PaymentStatus } from '../shared/subscriptions';
 import { hashPassword } from '../utils/crypto';
 import { env } from '../config/env';
 import { seedPlansIfEmpty } from '../models/Plan';
+import { ensureMissingReferralCodes } from '../database/ensureIndexes';
 
 let mongod: MongoMemoryServer | undefined;
 let passed = 0;
@@ -211,8 +212,7 @@ async function run() {
   });
 
   const registeredBuyer = await UserModel.findOne({ email: buyerEmail });
-  assert(registration.requiresVerification === true, 'registration requires email verification');
-  assert(!registration.token, 'registration does not issue a session before verification');
+  assert(registration.requiresVerification === true, 'registration requires email verification');  assert(!registration.token, 'registration does not issue a session before verification');
   assert(registeredBuyer?.isEmailVerified === false, 'new user starts email-unverified');
   assert(registeredBuyer?.isActive === false, 'new user starts inactive');
   assert(
@@ -222,6 +222,46 @@ async function run() {
   assert(
     registeredBuyer?.referralCodeUsed === normalReferrer.referralCode,
     'submitted referral code stored on the account'
+  );
+
+  const adminReferrer = await createUser({
+    name: 'Phase 18 Admin Referrer',
+    email: 'phase18.admin-referrer@example.com',
+    role: UserRole.SUPER_ADMIN,
+    referralCode: 'PHASE18-ADMIN-REF'
+  });
+  const adminReferredRegistration = await authService.register({
+    name: 'Phase 18 Admin Referred Buyer',
+    email: 'phase18.admin-referred@example.com',
+    password: 'StrongPassword123!',
+    referralCode: adminReferrer.referralCode
+  });
+  const adminReferredUser = await UserModel.findOne({
+    email: 'phase18.admin-referred@example.com'
+  });
+  assert(
+    adminReferredUser?.referredBy?.toString() === adminReferrer._id.toString(),
+    'a Main Admin referral code can be used to create an account'
+  );
+  assert(
+    adminReferredRegistration.requiresVerification === true,
+    'admin-referred registration still requires email verification'
+  );
+
+  const legacyAdminWithoutCode = await UserModel.create({
+    name: 'Legacy Admin Without Code',
+    email: 'phase18.legacy-admin@example.com',
+    passwordHash: await hashPassword('AdminStrongPass123!'),
+    role: UserRole.SUPER_ADMIN,
+    isEmailVerified: true,
+    isActive: true,
+    accountStatus: 'ACTIVE'
+  });
+  await ensureMissingReferralCodes();
+  const backfilledAdmin = await UserModel.findById(legacyAdminWithoutCode._id);
+  assert(
+    !!backfilledAdmin?.referralCode && backfilledAdmin.referralCode.startsWith('ADMIN-'),
+    'older admin accounts without a referral code are safely backfilled'
   );
 
   // Immutable referral relationship check.

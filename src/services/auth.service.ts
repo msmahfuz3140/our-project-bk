@@ -118,7 +118,7 @@ export class AuthService {
       referrer.isActive &&
       referrer.accountStatus === AccountStatus.ACTIVE &&
       referrer.referralEligible !== false &&
-      [UserRole.USER, UserRole.MODERATOR].includes(referrer.role) &&
+      [UserRole.USER, UserRole.MODERATOR, UserRole.SUPER_ADMIN].includes(referrer.role) &&
       (!referrer.email || referrer.isEmailVerified)
     );
 
@@ -437,6 +437,14 @@ export class AuthService {
           purpose: OtpPurpose.REGISTRATION
         }
       );
+    }
+
+    // Ensure every active account has a usable referral code. Older admin
+    // accounts created before referral codes were mandatory may otherwise have
+    // no code to share.
+    if (!user.referralCode) {
+      user.referralCode = await this.generateUniqueReferralCode();
+      await user.save();
     }
 
     // Admin Panel login requires a second factor. Never create a full admin

@@ -123,6 +123,7 @@ app.use(async (_req, _res, next) => {
       const { initializeAuthoritativeAdmin } = require('./database/initAdmin');
       const { ensurePaymentIndexes } = require('./database/ensureIndexes');
       const { ensureSecurityBaseline } = require('./database/ensureIndexes');
+      const { ensureMissingReferralCodes } = require('./database/ensureIndexes');
       const connected = await db.connect();
       if (connected) {
         await ensurePaymentIndexes().catch((err: any) => {
@@ -130,6 +131,9 @@ app.use(async (_req, _res, next) => {
         });
         await ensureSecurityBaseline().catch((err: any) => {
           logger.error('Failed to run security baseline migration:', err);
+        });
+        await ensureMissingReferralCodes().catch((err: any) => {
+          logger.error('Failed to backfill missing referral codes:', err);
         });
         await initializeAuthoritativeAdmin().catch((err: any) => {
           logger.error('Failed to initialize admin during startup:', err);

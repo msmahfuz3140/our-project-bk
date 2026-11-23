@@ -18,6 +18,7 @@ import { AdminRecoveryCodeModel } from '../models/AdminRecoveryCode';
 import { AdminTwoFactorChallengeModel } from '../models/AdminTwoFactorChallenge';
 import { SystemMigrationModel } from '../models/SystemMigration';
 import { resolveWithdrawalMethod } from '../shared/withdrawalMethods';
+import { generateRandomString } from '../utils/crypto';
 import { logger } from '../utils/logger';
 
 let ensured = false;
@@ -279,4 +280,77 @@ export async function ensureAdminTwoFactorRolloutMarker(): Promise<{
 
   logger.info('Admin 2FA rollout marker applied', { adminAccountsAtRollout });
   return { adminAccountsAtRollout };
+}
+
+/**
+ * Backfills missing referral codes for existing accounts (especially older
+ * admin accounts). Every active account must have a shareable code. The
+ * migration is idempotent and does not change existing codes or attribution.
+ */
+export async function ensureMissingReferralCodes(): Promise<{ backfilled: number }> {
+  if (mongoose.connection.readyState !== 1) {
+    return { backfilled: 0 };
+  }
+
+  const migrationKey = '2026-11-referral-code-backfill-v1';
+  const existing = await SystemMigrationModel.findOne({ key: migrationKey }).lean();
+  if (existing) {
+    return { backfilled: Number((existing as any)?.details?.backfilled || 0) };
+  }
+
+  const users = await UserModel.find({
+    isDeleted: { $ne: true },
+    $or: [
+      { referralCode: { $exists: false } },
+      { referralCode: null },
+      { referralCode: '' }
+    ]
+  })
+    .select('_id role')
+    .limit(10000)
+    .lean();
+
+  let backfilled = 0;
+  for (const user of users as any[]) {
+    const prefix = user.role === 'SUPER_ADMIN' ? 'ADMIN-' : 'REF-';
+    let code = '';
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const candidate = `${prefix}${generateRandomString(8).toUpperCase()}`;
+      const exists = await UserModel.exists({ referralCode: candidate });
+      if (!exists) {
+        code = candidate;
+        break;
+      }
+    }
+    if (!code) continue;
+    await UserModel.updateOne(
+      {
+        _id: user._id,
+        $or: [
+          { referralCode: { $exists: false } },
+          { referralCode: null },
+          { referralCode: '' }
+        ]
+      },
+      { $set: { referralCode: code } }
+    );
+    backfilled += 1;
+  }
+
+  await SystemMigrationModel.updateOne(
+    { key: migrationKey },
+    {
+      $setOnInsert: {
+        key: migrationKey,
+        appliedAt: new Date(),
+        details: { backfilled }
+      }
+    },
+    { upsert: true }
+  );
+
+  if (backfilled > 0) {
+    logger.info('Backfilled missing referral codes', { backfilled });
+  }
+  return { backfilled };
 }

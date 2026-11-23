@@ -5,6 +5,7 @@ import { ensurePaymentIndexes } from './database/ensureIndexes';
 import { ensureSecurityBaseline } from './database/ensureIndexes';
 import { ensureTrustAndPayoutMigration } from './database/ensureIndexes';
 import { ensureAdminTwoFactorRolloutMarker } from './database/ensureIndexes';
+import { ensureMissingReferralCodes } from './database/ensureIndexes';
 import { initializeAuthoritativeAdmin } from './database/initAdmin';
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job';
 import { startPaymentReconciliationJob } from './jobs/paymentReconciliation.job';
@@ -35,6 +36,10 @@ async function bootstrap() {
 
   await ensureAdminTwoFactorRolloutMarker().catch((err) => {
     logger.error('Warning: could not record admin 2FA rollout marker', err);
+  });
+
+  await ensureMissingReferralCodes().catch((err) => {
+    logger.error('Warning: could not backfill missing referral codes', err);
   });
 
   // Ensure authoritative SUPER_ADMIN exists in MongoDB and old demo accounts are removed
