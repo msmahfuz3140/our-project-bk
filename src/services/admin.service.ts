@@ -1128,12 +1128,15 @@ export class AdminService {
       throw ApiError.badRequest('Password must be at least 6 characters long');
     }
 
-    const targetRole = role || UserRole.USER;
-    if (
-      targetRole !== UserRole.SUPER_ADMIN &&
-      targetRole !== UserRole.MODERATOR &&
-      targetRole !== UserRole.USER
-    ) {
+    let targetRole: UserRole = UserRole.USER;
+    const rawRole = (role || 'USER').toString().toUpperCase().trim();
+    if (rawRole === 'SUPER_ADMIN' || rawRole === 'ADMIN') {
+      targetRole = UserRole.SUPER_ADMIN;
+    } else if (rawRole === 'MODERATOR' || rawRole === 'MOD') {
+      targetRole = UserRole.MODERATOR;
+    } else if (rawRole === 'USER' || rawRole === 'MEMBER') {
+      targetRole = UserRole.USER;
+    } else {
       throw ApiError.badRequest('Role must be SUPER_ADMIN, MODERATOR, or USER');
     }
 
@@ -1185,21 +1188,32 @@ export class AdminService {
       ? new mongoose.Types.ObjectId(adminId)
       : new mongoose.Types.ObjectId();
 
-    const newUser = await UserModel.create({
+    const userPayload: Record<string, any> = {
       name: name.trim(),
       email: normalizedEmail,
-      phone: normalizedPhone || undefined,
       passwordHash,
       role: targetRole,
       accountStatus: AccountStatus.ACTIVE,
       isActive: true,
       isEmailVerified: true,
-      isPhoneVerified: !!normalizedPhone,
       referralCode,
-      moderatorCommissionRate: normalizedCommissionRate,
-      moderatorNotes: notes ? notes.trim() : undefined,
       createdByAdminId: adminObjectId
-    });
+    };
+
+    if (normalizedPhone) {
+      userPayload.phone = normalizedPhone;
+      userPayload.isPhoneVerified = true;
+    }
+
+    if (normalizedCommissionRate !== undefined) {
+      userPayload.moderatorCommissionRate = normalizedCommissionRate;
+    }
+
+    if (notes && notes.trim()) {
+      userPayload.moderatorNotes = notes.trim();
+    }
+
+    const newUser = await UserModel.create(userPayload);
 
     // Ensure wallet exists for new user / moderator
     await WalletModel.create({
@@ -1211,13 +1225,17 @@ export class AdminService {
       totalWithdrawnCents: 0
     }).catch(() => null);
 
+    const effectiveReason =
+      reason?.trim() ||
+      `Direct ${targetRole === UserRole.SUPER_ADMIN ? 'Administrator' : targetRole === UserRole.MODERATOR ? 'Moderator' : 'VIP Member'} account provisioning by admin`;
+
     // Auto grant subscription if planId is provided and targetRole is USER
     if (targetRole === UserRole.USER && planId && planId !== 'none') {
       try {
-        await subscriptionAccessService.grantManualSubscription(adminId, {
+        await subscriptionAccessService.grantManualSubscription(adminObjectId.toString(), {
           targetEmail: newUser.email,
           planId,
-          reason: reason || 'Initial VIP pass granted on user creation by admin'
+          reason: effectiveReason
         });
       } catch (err: any) {
         logger.warn(`Failed to auto-grant plan ${planId} to ${newUser.email}: ${err.message}`);
@@ -1238,7 +1256,7 @@ export class AdminService {
       adminEmail,
       targetUserId: newUser._id,
       targetUserEmail: newUser.email,
-      reason: reason || `Super Admin manually provisioned ${targetRole} account`,
+      reason: effectiveReason,
       newValue: {
         userId: newUser._id.toString(),
         name: newUser.name,

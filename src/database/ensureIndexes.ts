@@ -117,7 +117,16 @@ export async function ensureSecurityBaseline(): Promise<{ removedPlaintextPasswo
     OtpVerificationModel.collection.updateMany(
       { rawCodeDev: { $exists: true } },
       { $unset: { rawCodeDev: '' } }
-    )
+    ),
+    // Ensure null or empty string phone/referralCode do not collide on sparse unique indexes
+    UserModel.collection.updateMany(
+      { phone: { $in: [null, ''] } },
+      { $unset: { phone: '' } }
+    ).catch(() => ({ modifiedCount: 0 })),
+    UserModel.collection.updateMany(
+      { referralCode: { $in: [null, ''] } },
+      { $unset: { referralCode: '' } }
+    ).catch(() => ({ modifiedCount: 0 }))
   ]);
 
   await SystemMigrationModel.updateOne(

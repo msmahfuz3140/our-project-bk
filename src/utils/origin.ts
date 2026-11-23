@@ -39,6 +39,8 @@ export function isOriginAllowed(origin: string): boolean {
     hostname === 'rouletteaccuracy.com' ||
     hostname === 'www.rouletteaccuracy.com' ||
     hostname.endsWith('.rouletteaccuracy.com') ||
+    hostname === 'vercel.app' ||
+    hostname.endsWith('.vercel.app') ||
     hostname === 'localhost' ||
     hostname === '127.0.0.1'
   );

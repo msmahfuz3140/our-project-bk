@@ -50,12 +50,8 @@ router.delete('/users/:userId', (req, res, next) =>
   adminController.softDeleteUser(req, res, next)
 );
 
-// Create Staff User (Super Admin or Moderator) directly into DB
-router.post('/users/create-staff', (req, res, next) =>
-  adminController.createStaffUser(req, res, next)
-);
-
-router.post('/users', (req, res, next) =>
+// Create User or Staff (Super Admin, Moderator, User) directly in MongoDB
+router.post(['/users/create-staff', '/users', '/users/add', '/create-staff'], (req, res, next) =>
   adminController.createStaffUser(req, res, next)
 );
 
