@@ -396,6 +396,31 @@ async function runPhase9Tests() {
     assert.strictEqual(dbMod.moderatorCommissionRate, 0.50, 'Moderator commission normalized to 0.50 (50%)');
     pass('Partner Moderator provisioned with 50% commission directly in MongoDB');
 
+    // 2b. Create a regular User (VIP) directly in MongoDB
+    const newUserResult = await adminService.createStaffUser(
+      mainAdmin._id.toString(),
+      mainAdmin.email,
+      {
+        name: 'Direct Added Member',
+        email: 'direct_user@rouletteaccuracy.com',
+        phone: '+8801933445566',
+        password: 'User_Password_2026!',
+        role: UserRole.USER,
+        notes: 'Manually onboarded VIP customer',
+        reason: 'Direct customer provisioning by root administrator'
+      }
+    );
+
+    assert.ok(newUserResult.user._id, 'User ID generated in MongoDB');
+    assert.strictEqual(newUserResult.user.role, UserRole.USER, 'Role is strictly USER');
+    assert.ok(newUserResult.user.referralCode.startsWith('VIP_'), 'Referral code has VIP_ prefix');
+
+    const dbUser = await UserModel.findOne({ email: 'direct_user@rouletteaccuracy.com' });
+    assert.ok(dbUser, 'User record exists directly in MongoDB');
+    assert.strictEqual(dbUser.role, UserRole.USER, 'Role in MongoDB is USER');
+    assert.strictEqual(dbUser.isEmailVerified, true, 'User email verified');
+    pass('VIP Member User provisioned and persisted directly in MongoDB');
+
     // 3. Verify role filtering in adminService.getUsers
     const adminList = await adminService.getUsers({ role: 'SUPER_ADMIN' });
     assert.strictEqual(adminList.users.length, 2, 'Found exactly 2 admins in MongoDB (mainAdmin + newly added admin)');

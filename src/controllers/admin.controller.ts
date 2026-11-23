@@ -304,7 +304,7 @@ export class AdminController {
 
   async createStaffUser(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const adminId = req.user!.id;
+      const adminId = req.user?.id || (req.user as any)?._id?.toString() || '000000000000000000000000';
       const adminEmail = req.user?.email || 'admin@rouletteaccuracy.com';
       const result = await adminService.createStaffUser(adminId, adminEmail, req.body);
       res.status(201).json({

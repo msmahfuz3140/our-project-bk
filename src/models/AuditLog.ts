@@ -49,7 +49,10 @@ export type AuditActionType =
   | 'ADMIN_2FA_DISABLED'
   | 'ADMIN_2FA_RESET'
   | 'ADMIN_2FA_OWNER_RECOVERY'
-  | 'MAIN_ADMIN_BOOTSTRAP';
+  | 'MAIN_ADMIN_BOOTSTRAP'
+  | 'ROLE_PROMOTION_SUPER_ADMIN'
+  | 'ROLE_PROMOTION_MODERATOR'
+  | 'USER_CREATED_BY_ADMIN';
 
 export interface IAuditLog extends Document {
   action: AuditActionType;

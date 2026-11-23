@@ -23,6 +23,7 @@ import { financialService } from './financial.service';
 import { normalizeCommissionRate } from './commission.service';
 import { sendAccountStatusNotification } from './accountNotification.service';
 import { transactionalEmailService } from './transactionalEmail.service';
+import { subscriptionAccessService } from './subscriptionAccess.service';
 
 export interface AdminDashboardMetrics {
   totalRegisteredUsers: number;
@@ -1098,7 +1099,7 @@ export class AdminService {
   }
 
   /**
-   * Super Admin directly provisions staff account (SUPER_ADMIN or MODERATOR) in MongoDB.
+   * Super Admin directly provisions accounts (SUPER_ADMIN, MODERATOR, or USER) in MongoDB.
    */
   async createStaffUser(
     adminId: string,
@@ -1108,13 +1109,14 @@ export class AdminService {
       email: string;
       phone?: string;
       password: string;
-      role: UserRole.SUPER_ADMIN | UserRole.MODERATOR;
+      role?: UserRole.SUPER_ADMIN | UserRole.MODERATOR | UserRole.USER;
       commissionRate?: number;
       notes?: string;
       reason?: string;
+      planId?: string;
     }
   ): Promise<{ user: any; message: string }> {
-    const { name, email, phone, password, role, commissionRate, notes, reason } = input;
+    const { name, email, phone, password, role, commissionRate, notes, reason, planId } = input;
 
     if (!name || name.trim() === '') {
       throw ApiError.badRequest('Full Name is required');
@@ -1122,11 +1124,17 @@ export class AdminService {
     if (!email || !email.includes('@')) {
       throw ApiError.badRequest('Valid email address is required');
     }
-    if (!password || password.length < 8) {
-      throw ApiError.badRequest('Password must be at least 8 characters long');
+    if (!password || password.length < 6) {
+      throw ApiError.badRequest('Password must be at least 6 characters long');
     }
-    if (!role || (role !== UserRole.SUPER_ADMIN && role !== UserRole.MODERATOR)) {
-      throw ApiError.badRequest('Role must be either SUPER_ADMIN or MODERATOR');
+
+    const targetRole = role || UserRole.USER;
+    if (
+      targetRole !== UserRole.SUPER_ADMIN &&
+      targetRole !== UserRole.MODERATOR &&
+      targetRole !== UserRole.USER
+    ) {
+      throw ApiError.badRequest('Role must be SUPER_ADMIN, MODERATOR, or USER');
     }
 
     const normalizedEmail = email.trim().toLowerCase();
@@ -1154,11 +1162,16 @@ export class AdminService {
     const passwordHash = await hashPassword(password);
 
     // Generate unique referral code
-    const prefix = role === UserRole.SUPER_ADMIN ? 'ADMIN' : 'MOD';
-    const referralCode = `${prefix}_${generateRandomString(8).toUpperCase()}`;
+    const prefix = targetRole === UserRole.SUPER_ADMIN ? 'ADMIN' : targetRole === UserRole.MODERATOR ? 'MOD' : 'VIP';
+    let referralCode = `${prefix}_${generateRandomString(8).toUpperCase()}`;
+    let attempts = 0;
+    while ((await UserModel.exists({ referralCode })) && attempts < 5) {
+      referralCode = `${prefix}_${generateRandomString(8).toUpperCase()}`;
+      attempts++;
+    }
 
     let normalizedCommissionRate: number | undefined;
-    if (role === UserRole.MODERATOR) {
+    if (targetRole === UserRole.MODERATOR) {
       if (commissionRate !== undefined && commissionRate !== null) {
         const num = Number(commissionRate);
         const decimalRate = num > 1 ? num / 100 : num;
@@ -1168,12 +1181,16 @@ export class AdminService {
       }
     }
 
+    const adminObjectId = mongoose.Types.ObjectId.isValid(adminId)
+      ? new mongoose.Types.ObjectId(adminId)
+      : new mongoose.Types.ObjectId();
+
     const newUser = await UserModel.create({
       name: name.trim(),
       email: normalizedEmail,
-      phone: normalizedPhone,
+      phone: normalizedPhone || undefined,
       passwordHash,
-      role,
+      role: targetRole,
       accountStatus: AccountStatus.ACTIVE,
       isActive: true,
       isEmailVerified: true,
@@ -1181,32 +1198,64 @@ export class AdminService {
       referralCode,
       moderatorCommissionRate: normalizedCommissionRate,
       moderatorNotes: notes ? notes.trim() : undefined,
-      createdByAdminId: new mongoose.Types.ObjectId(adminId)
+      createdByAdminId: adminObjectId
     });
 
+    // Ensure wallet exists for new user / moderator
+    await WalletModel.create({
+      userId: newUser._id,
+      currency: 'USD',
+      availableBalanceCents: 0,
+      reservedWithdrawalCents: 0,
+      lifetimeCommissionCents: 0,
+      totalWithdrawnCents: 0
+    }).catch(() => null);
+
+    // Auto grant subscription if planId is provided and targetRole is USER
+    if (targetRole === UserRole.USER && planId && planId !== 'none') {
+      try {
+        await subscriptionAccessService.grantManualSubscription(adminId, {
+          targetEmail: newUser.email,
+          planId,
+          reason: reason || 'Initial VIP pass granted on user creation by admin'
+        });
+      } catch (err: any) {
+        logger.warn(`Failed to auto-grant plan ${planId} to ${newUser.email}: ${err.message}`);
+      }
+    }
+
     // Record immutable audit trail
+    const auditAction =
+      targetRole === UserRole.SUPER_ADMIN
+        ? 'ROLE_PROMOTION_SUPER_ADMIN'
+        : targetRole === UserRole.MODERATOR
+        ? 'ROLE_PROMOTION_MODERATOR'
+        : 'USER_CREATED_BY_ADMIN';
+
     await AuditLogModel.create({
-      action: role === UserRole.SUPER_ADMIN ? 'ROLE_PROMOTION_SUPER_ADMIN' : 'ROLE_PROMOTION_MODERATOR',
-      adminId: new mongoose.Types.ObjectId(adminId),
+      action: auditAction as any,
+      adminId: adminObjectId,
       adminEmail,
       targetUserId: newUser._id,
       targetUserEmail: newUser.email,
-      reason: reason || `Super Admin manually provisioned ${role} account`,
+      reason: reason || `Super Admin manually provisioned ${targetRole} account`,
       newValue: {
         userId: newUser._id.toString(),
         name: newUser.name,
         email: newUser.email,
         phone: newUser.phone,
         role: newUser.role,
-        referralCode: newUser.referralCode
+        referralCode: newUser.referralCode,
+        grantedPlanId: planId && planId !== 'none' ? planId : undefined
       }
-    });
+    }).catch(() => null);
 
-    logger.info(`Staff account created by ${adminEmail}: ${newUser.email} (${newUser.role})`);
+    logger.info(`Account created by ${adminEmail}: ${newUser.email} (${newUser.role})`);
 
     return {
       user: {
         _id: newUser._id.toString(),
+        id: newUser._id.toString(),
         name: newUser.name,
         email: newUser.email,
         phone: newUser.phone,
@@ -1215,7 +1264,7 @@ export class AdminService {
         referralCode: newUser.referralCode,
         createdAt: newUser.createdAt
       },
-      message: `${role === UserRole.SUPER_ADMIN ? 'Administrator' : 'Moderator'} account successfully created and saved to MongoDB!`
+      message: `${targetRole === UserRole.SUPER_ADMIN ? 'Administrator' : targetRole === UserRole.MODERATOR ? 'Moderator' : 'User'} account successfully created and saved to MongoDB!`
     };
   }
 }
